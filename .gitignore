@@ -35,3 +35,10 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### Environment Variables ###
+.env
+.env.*
+
+### Private docs (not for GitHub) ###
+.claude/portfolio.md

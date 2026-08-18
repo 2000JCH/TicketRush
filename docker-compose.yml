@@ -1,0 +1,76 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ticketrush-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ticketrush
+      MYSQL_USER: ticketrush
+      MYSQL_PASSWORD: ticketrush
+    ports:
+      - "3306:3306"
+    # Debezium이 binlog를 읽을 수 있도록 CDC용 옵션을 켠다 (decisions.md 6번, db-schema.md outbox_events)
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2
+    container_name: ticketrush-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: ticketrush-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # PLAINTEXT: 호스트(로컬 Spring Boot 앱)에서 접속, PLAINTEXT_INTERNAL: 도커 네트워크 안(Kafka Connect 등)에서 접속
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: false
+      CLUSTER_ID: GQIZo3kUxRLhbn8NBZPs5Q
+
+  kafka-connect:
+    # Debezium MySQL 커넥터가 이미 포함된 이미지 (decisions.md 6번 Outbox 패턴 CDC)
+    image: debezium/connect:2.6
+    container_name: ticketrush-kafka-connect
+    depends_on:
+      kafka:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: debezium-connect
+      CONFIG_STORAGE_TOPIC: debezium-configs
+      OFFSET_STORAGE_TOPIC: debezium-offsets
+      STATUS_STORAGE_TOPIC: debezium-status
+
+volumes:
+  mysql_data:
+  redis_data:
