@@ -73,9 +73,19 @@
   - JUnit 자동 테스트 8개(결제 요청 성공/중복 idempotencyKey 거절/홀드 없이 요청 거절/요청과 홀드 불일치 거절/확정 전이+active_reservation 정리/확정 멱등성/실패→보상→좌석 반납/스탠딩 수량·금액 계산) 전부 통과 + `POST /api/v1/reservations` 실제 HTTP 엔드포인트도 Node 스크립트로 별도 검증(성공/중복 거절/입장 토큰 없음 거절). `gradlew.bat test` 전체 통과.
   - **다음 단계로 미룬 것**: 실제 PG 호출, 웹훅 서명 검증, Kafka exactly-once 발행, 예약 조회/취소 API — 전부 3주차 "결제 연동". 결제 처리 타임아웃 수치(`payment.processing-timeout-millis`, 지금은 2분 placeholder)도 여전히 미정.
 
+- **2026-08-20**: **분산락 벤치마크 구현 완료 (2주차 마지막 항목) — 2주차 코드 구현 전체 종료**. 그룹 좌석 홀드(좌석 2개 동시 선택)를 `domain/seat/lock/GroupHoldLockStrategy` 인터페이스로 추상화하고 두 구현을 모두 만들었다: `RedissonGroupHoldLockStrategy`(RLock, seatId 오름차순으로 순서대로 락을 걸어 데드락 방지)와 `DbPessimisticLockGroupHoldLockStrategy`(`SeatRepository.findAllByIdInForUpdate`의 `SELECT ... FOR UPDATE`, `seat` 행을 좌석 상태의 원천인 Redis와 무관하게 순수 뮤텍스로만 사용). `group-hold.lock-strategy` 프로퍼티(`redis`/`db`, 기본값 `redis`)로 `@ConditionalOnProperty` 전환한다.
+  - **"2주차 완료"의 범위를 명확히 함**: 원래 주간 계획(아래 "주차별 일정" 표)의 2주차 마지막 항목은 "분산락 벤치마크(그룹 좌석 홀드 락 방식 **확정**)"이었다 — "확정"은 Redisson과 DB 락 중 실제로 하나를 고르는 것까지 포함하는 표현이었다. 오늘 끝난 건 그 결정에 필요한 **두 구현과 정합성 검증**이고, **어느 쪽을 채택할지는 아직 정하지 않았다** — 3주차 Gatling 부하테스트로 넘어간다(decisions.md 2번 채택 기준 적용은 그때). 그래서 "2주차 코드 구현은 끝났지만, '방식 확정'이라는 마지막 결정 하나는 3주차에 걸쳐 있다"는 것이 정확한 상태다(사용자와 함께 이 구분을 확인함).
+  - **오늘 범위(사용자 확인 완료)**: 두 락 구현과 그룹 홀드 API까지만 오늘 완성하고, **실제 Gatling 비교·최종 채택은 3주차 부하 테스트로 미룬다** — decisions.md 2번의 채택 기준(오버셀 0건 전제 → 처리량 차 20%p 기준)은 아직 적용하지 않았다.
+  - **Redisson 도입 방식**: `redisson-spring-boot-starter` 대신 core 아티팩트(`org.redisson:redisson:4.7.0`)만 추가하고 `RedissonConfig`에서 `RedissonClient`를 직접 구성했다 — Spring Boot 4가 기본으로 쓰는 Jackson 3와 Redisson의 Jackson 2 기반 Spring 자동 설정이 얽힐 위험을 사전에 차단하기 위함([redisson#6892](https://github.com/redisson/redisson/issues/6892)에서 아직 논의 중인 걸 확인). RLock은 값 직렬화가 필요 없어 애초에 이 코덱을 거칠 필요가 없었다.
+  - **DB 락 구현에서 발견한 함정**: `SeatService.hold()`가 `@Transactional(readOnly = true)`인데, 그 안에서 그냥 호출하면 DB 락이 이후 처리(스케줄 등록 등)까지 필요 이상으로 오래 유지돼 Redisson 구현과 락 보유 시간이 달라져 벤치마크 조건이 어긋난다. `DbPessimisticLockGroupHoldLockStrategy.withLock`을 `Propagation.REQUIRES_NEW`로 별도 트랜잭션으로 열어, 락이 action 실행 동안으로만 좁혀지게 했다 — Redisson 구현이 락을 `groupHoldLockStrategy.withLock` 호출 구간에서만 쥐는 것과 정확히 대응시키기 위함.
+  - **`SeatService`/`ReservationService`를 좌석 1개 전제에서 좌석 목록(1~2개) 전제로 확장**: `HoldRecord`/`ActiveHold`의 `seatId`(단일)를 `seatIds`(목록)로 바꾸고, `active_reservation`/`hold_schedule` 인코딩도 쉼표 구분 목록을 담도록 재설계(`HoldRecord.encode/parse`). `confirmHold`/`compensate`/`reschedulePaymentTimeout`가 좌석 목록을 순회하도록 고쳤고, `ReservationService`도 `reservation_seat` 자식 테이블에 좌석 1~2행을 각각 저장/확정/반납하도록 반복 처리로 바꿨다. 기존 단일 좌석 흐름은 동작을 그대로 유지한다(`ReservationServiceTest` 8개 전부 통과로 확인).
+  - **그룹 홀드 원자성**: "두 좌석 다 성공 또는 둘 다 실패"를 보장하기 위해 `holdSeatsOrRollback`이 순차적으로 `HSETNX`를 시도하다 하나라도 실패하면 그때까지 잡은 좌석을 즉시 롤백한다. 락은 이 동시성(여러 요청이 겹치는 좌석 쌍을 동시에 시도하는 것) 자체를 막는 역할이고, 오버셀 방지 자체는 좌석 단위 `HSETNX`(decisions.md 1번)가 이미 원자적으로 보장한다.
+  - **자동 테스트로 검증**: `SeatServiceGroupHoldTest`(기본 프로퍼티=Redisson, 5개 케이스: 그룹 홀드 성공/중복 좌석 거절/3개 이상 거절/한 좌석 선점 시 롤백/동시 요청 8개 중 1개만 성공)와 `SeatServiceGroupHoldDbLockTest`(`@SpringBootTest(properties = "group-hold.lock-strategy=db")`로 별도 스프링 컨텍스트, 같은 핵심 시나리오 3개 재검증) — 두 파일 다 오버셀 0건을 동시성 테스트(`ExecutorService` 8스레드가 같은 좌석 쌍을 동시에 시도)로 직접 확인했다. 전체 테스트(`ReservationServiceTest` 8 + 이 두 파일 8 + 기존 1)까지 `gradlew.bat test` 17개 전부 통과.
+  - **다음 단계로 미룬 것**: Gatling 시나리오 작성, 실측 처리량/지연/에러율 비교, 최종 락 방식 채택(decisions.md 2번) — 전부 3주차 부하 테스트. `portfolio.md`의 "분산락 벤치마크" 소재(192번째 줄 표)는 그 실측이 끝난 뒤에 채운다.
+
 ## 다음 작업 순서
 
-1. **2주차 진행 중**: 좌석 상태 모델(단일 좌석 흐름, ✅ 완료) → 홀드 TTL/만료 처리(✅ 완료) → Saga 상태머신(✅ 완료) → 분산락 벤치마크(그룹 좌석 홀드 락 방식 확정). 진행 상황은 위 "구현 진행 상황"에 계속 추가
+1. **2주차 코드 구현 완료** — 좌석 상태 모델 → 홀드 TTL/만료 처리 → Saga 상태머신 → 분산락 두 방식 구현(Redisson RLock / DB 비관적 락). **단, "분산락 최종 채택"(decisions.md 2번)은 아직 열려있는 항목**이고 3주차 부하 테스트에서 닫는다. 다음은 **3주차**: Kafka exactly-once → 결제 연동(예약 취소 API 포함) → Nginx + 인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포 → 카오스 테스트 + **부하테스트 착수(Gatling으로 분산락 최종 채택 포함)**.
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
 
@@ -91,8 +101,8 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 | 주차 | 기간(대략) | 작업 |
 |---|---|---|
 | 1주차 | 08-10 ~ 08-16 | 인증/인가 기반 구축(회원가입/로그인/JWT, Refresh Token은 httpOnly Cookie + Redis 저장) → **ADMIN 승인 API(ORGANIZER 가입 승인)** → **이벤트/구역/좌석 등록 API** → 대기열(순번 관리) 구현 → **포트원 테스트 계정/웹훅 수신 스모크테스트**(사업자등록 불필요, 3주차 결제 연동 시점에 막히지 않도록 선행 확인). **전체 완료.** PG는 토스페이먼츠(카드)+카카오페이(간편결제) 2채널로 확정. |
-| 2주차 | 08-17 ~ 08-23 | 좌석 상태 모델(단일 좌석 흐름), 홀드 TTL/만료 처리, Saga 상태머신, 분산락 벤치마크(그룹 좌석 홀드 락 방식 확정) |
-| 3주차 | 08-24 ~ 08-30 | Kafka exactly-once, 결제 연동(**예약 취소 API 포함**), Nginx 설정 + **인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포**(decisions.md 10번, 4주차에서 앞당김) → **후반부에 카오스 테스트 + 부하테스트 착수** |
+| 2주차 | 08-17 ~ 08-23 | 좌석 상태 모델(단일 좌석 흐름), 홀드 TTL/만료 처리, Saga 상태머신, 분산락 벤치마크(Redisson RLock/DB 비관적 락 **두 방식 구현** — 어느 쪽을 채택할지 **확정**은 3주차 부하테스트로 이월) |
+| 3주차 | 08-24 ~ 08-30 | Kafka exactly-once, 결제 연동(**예약 취소 API 포함**), Nginx 설정 + **인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포**(decisions.md 10번, 4주차에서 앞당김) → **후반부에 카오스 테스트 + 부하테스트 착수(분산락 최종 채택 포함)** |
 | 4주차 | 08-31 ~ 09-09 | 카오스 테스트·부하테스트 마무리, 결과 기반 간단한 리팩토링만. 새 기능/인프라 변경 없음 |
 
 **2026-08-16 (1주차 마지막 날) 점검에서 발견/확정된 사항**: decisions.md 13번 구현순서와 주차 일정을 대조한 결과, "이벤트/구역/좌석 등록 API"와 "ADMIN 승인 API"가 설계(api-design.md 2·6번)는 되어 있었지만 구현순서/주차 일정 어디에도 명시적으로 안 들어가 있던 걸 발견 — ADMIN 승인이 없으면 ORGANIZER가 로그인을 못해 이벤트 등록 자체가 막히고, 이벤트/좌석 데이터가 없으면 2주차 좌석 상태 모델 작업을 검증할 수 없어 순서상 1주차(인증/인가 다음)에 추가함(사용자 확인 완료). 예약 취소 API는 별도 항목 없이 3주차 결제 연동에 포함(Saga 보상 로직 재사용). 이 참에 미확정이었던 **Refresh Token 저장 방식도 확정**: httpOnly Cookie로 전달 + Redis(`refresh_token:{accountId}`)에 저장해 로그아웃/재로그인 시 무효화, 다중 기기 로그인은 미지원(계정당 1개 세션). decisions.md 3번, redis-design.md 9번, db-schema.md, api-design.md 전부 반영 완료.
@@ -100,6 +110,8 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 **1주차 마무리**: 인증/인가·ADMIN 승인·이벤트/구역/좌석 등록·대기열·포트원 웹훅 스모크테스트까지 모두 완료. 2주차(좌석 상태 모델/홀드 TTL/Saga/분산락 벤치마크)로 진행.
 
 **2026-08-19 세션 마무리**: 2주차 4개 항목 중 3개(좌석 상태 모델, 홀드 TTL/만료 처리, Saga 상태머신) 완료. 남은 건 **분산락 벤치마크** 하나뿐 — 다음 세션에서 이어서 진행. 이 과정에서 나온 부수 결정 2건: (1) Redis 만료 처리를 Keyspace Notification 대신 `hold_schedule` 정렬 집합 방식으로 재설계, `docker-compose.yml` AOF/RDB도 문서 원안대로 끔. (2) 이벤트별 구매 한도(1인 1매/2매) 조직자 설정 기능은 이번 프로젝트 핵심(동시성 제어)과 무관한 CRUD성 기능이라 **보류 확정** — 필요해지면 3주차 후반에 짧게 추가(위 "여유 있을 때 아무 때나 결정 가능" 항목 참고), 4주차엔 넣지 않음.
+
+**2주차 마무리(2026-08-20)**: 좌석 상태 모델·홀드 TTL/만료 처리·Saga 상태머신·분산락 두 방식 구현까지 **코드는 전부 완료**. 다만 "분산락 최종 채택"(어느 방식을 쓸지 실제로 고르는 것)은 Gatling이 없어 3주차 부하테스트로 넘어간 채 열려있다 — 3주차 카오스/부하테스트 항목에서 이걸 닫아야 2주차 계획이 완전히 끝난다. 3주차(Kafka exactly-once/결제 연동/인프라·AWS 배포/카오스·부하테스트)로 진행.
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
@@ -111,7 +123,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 ### 시점이 정해진 결정 (해당 주차 되면 확정)
 
-- **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 2주차 분산락 벤치마크 후, 이미 정해진 채택 기준(정합성 우선 → 처리량 차이 20%p 이상이면 우세한 쪽, 미만이면 DB 락)에 따라 확정
+- **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 두 구현은 2026-08-20에 완료(`GroupHoldLockStrategy`), 실제 채택은 **3주차 부하테스트**에서 Gatling 실측 후 이미 정해진 채택 기준(정합성 우선 → 처리량 차이 20%p 이상이면 우세한 쪽, 미만이면 DB 락)에 따라 확정
 - **인프라 도입 여부**(decisions.md 10번): EKS, ElastiCache, MSK, CloudWatch — 3주차 배포 시점에 확정
 - **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 위 인프라 도입 여부가 3주차에 확정된 뒤 추가
 
