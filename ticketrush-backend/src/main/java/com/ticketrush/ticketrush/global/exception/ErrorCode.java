@@ -24,6 +24,16 @@ public enum ErrorCode {
     EVENT_NOT_FOUND(HttpStatus.NOT_FOUND, "이벤트를 찾을 수 없습니다."),
     EVENT_ALREADY_OPENED(HttpStatus.CONFLICT, "이미 예매가 시작된 이벤트는 수정하거나 삭제할 수 없습니다."),
     QUEUE_ENTRY_NOT_FOUND(HttpStatus.NOT_FOUND, "대기열에 진입한 기록이 없습니다. 다시 진입해주세요."),
+    ENTRY_TOKEN_REQUIRED(HttpStatus.UNAUTHORIZED, "입장 토큰이 필요합니다."),
+    ENTRY_TOKEN_EXPIRED(HttpStatus.UNAUTHORIZED, "입장 토큰이 만료되었습니다. 대기열에 다시 진입해주세요."),
+    SEAT_NOT_FOUND(HttpStatus.NOT_FOUND, "좌석을 찾을 수 없습니다."),
+    SEAT_ALREADY_HELD(HttpStatus.CONFLICT, "이미 선택된 좌석입니다."),
+    STANDING_SOLD_OUT(HttpStatus.CONFLICT, "매진되었습니다."),
+    ACTIVE_RESERVATION_EXISTS(HttpStatus.CONFLICT, "이미 진행 중인 예매가 있습니다."),
+    QUANTITY_LIMIT_EXCEEDED(HttpStatus.CONFLICT, "1인당 최대 2매까지 구매 가능합니다."),
+    ACTIVE_HOLD_NOT_FOUND(HttpStatus.NOT_FOUND, "결제를 요청할 좌석 홀드가 없습니다. 다시 선택해주세요."),
+    DUPLICATE_PAYMENT_REQUEST(HttpStatus.CONFLICT, "이미 처리 중인 결제 요청입니다."),
+    RESERVATION_NOT_FOUND(HttpStatus.NOT_FOUND, "예약을 찾을 수 없습니다."),
     INVALID_INPUT(HttpStatus.BAD_REQUEST, "요청 입력값이 올바르지 않습니다."),
     INTERNAL_SERVER_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "서버 내부 오류가 발생했습니다.");
 

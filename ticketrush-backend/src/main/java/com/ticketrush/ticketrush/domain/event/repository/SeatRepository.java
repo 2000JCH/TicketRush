@@ -1,6 +1,7 @@
 package com.ticketrush.ticketrush.domain.event.repository;
 
 import com.ticketrush.ticketrush.domain.event.entity.Seat;
+import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -9,6 +10,9 @@ import org.springframework.data.repository.query.Param;
 public interface SeatRepository extends JpaRepository<Seat, Long> {
 
     long countBySectionId(Long sectionId);
+
+    /** 좌석 상태 조회 API(api-design.md 4번)에서 좌석 배치 순서대로 내려주기 위해 정렬해서 조회한다. */
+    List<Seat> findAllBySectionIdOrderByRowNoAscSeatNoAsc(Long sectionId);
 
     /**
      * 오픈 전 전체 교체/삭제 시 이벤트에 속한 좌석을 한 번에 지운다.

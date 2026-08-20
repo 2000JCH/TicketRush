@@ -30,7 +30,10 @@ services:
     container_name: ticketrush-redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes
+    # AOF/RDB 영속성은 켜지 않는다(decisions.md 1번, redis-design.md "설정") —
+    # 여기 저장되는 좌석 홀드 등은 휘발돼도 되는 임시 상태라 디스크 복구가 필요 없다.
+    # --save ""를 명시하지 않으면 이미지 기본값(RDB 스냅샷 주기)이 그대로 켜져 있으므로 함께 끈다.
+    command: redis-server --save ""
     volumes:
       - redis_data:/data
 

@@ -64,6 +64,23 @@ public class QueueService {
      * 이 순서라면 최악의 경우 "토큰은 받았는데 대기열에도 남아있는" 상태인데,
      * 조회 시 토큰을 먼저 보므로 사용자에겐 정상이고 다음 주기에 정리된다.
      */
+    /**
+     * 좌석/결제 등 입장 토큰이 필요한 API 공통 검증(decisions.md 4번, api-design.md 공통 규칙).
+     * 헤더 자체가 없으면 ENTRY_TOKEN_REQUIRED, 있는데 발급 기록이 없거나 값이 다르면
+     * ENTRY_TOKEN_EXPIRED로 구분한다 — 둘 다 결국 대기열 재진입이 필요하다는 신호지만,
+     * "아예 안 들고 옴"과 "만료/위조된 걸 들고 옴"을 구분해 클라이언트가 원인을 알 수 있게 한다.
+     */
+    public void validateEntryToken(Long accountId, Long eventId, String entryToken) {
+        if (entryToken == null || entryToken.isBlank()) {
+            throw new BusinessException(ErrorCode.ENTRY_TOKEN_REQUIRED);
+        }
+        String issuedToken = entryTokenRepository.find(eventId, accountId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.ENTRY_TOKEN_EXPIRED));
+        if (!issuedToken.equals(entryToken)) {
+            throw new BusinessException(ErrorCode.ENTRY_TOKEN_EXPIRED);
+        }
+    }
+
     public int admitFront(Long eventId) {
         List<Long> accountIds = queueRepository.findFront(eventId, admitCount);
         if (accountIds.isEmpty()) {
