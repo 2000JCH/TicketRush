@@ -28,6 +28,10 @@ dependencies {
 	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
 	// jjwt의 JSON 직렬화기. jjwt-jackson은 Jackson 2를 요구하는데 Spring Boot 4는 Jackson 3을 쓰므로 gson을 쓴다.
 	runtimeOnly 'io.jsonwebtoken:jjwt-gson:0.12.6'
+	// 그룹 좌석 홀드 분산락(decisions.md 2번)용. redisson-spring-boot-starter 대신 core만 추가하고
+	// RedissonClient를 직접 구성한다 — RLock은 값 직렬화가 필요 없어 Spring Boot 4의 Jackson 3와
+	// Redisson의 Jackson 2 기반 Spring 자동 설정이 얽힐 여지를 애초에 만들지 않기 위함.
+	implementation 'org.redisson:redisson:4.7.0'
 	compileOnly 'org.projectlombok:lombok'
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	runtimeOnly 'com.mysql:mysql-connector-j'

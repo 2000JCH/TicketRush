@@ -31,6 +31,7 @@ public enum ErrorCode {
     STANDING_SOLD_OUT(HttpStatus.CONFLICT, "매진되었습니다."),
     ACTIVE_RESERVATION_EXISTS(HttpStatus.CONFLICT, "이미 진행 중인 예매가 있습니다."),
     QUANTITY_LIMIT_EXCEEDED(HttpStatus.CONFLICT, "1인당 최대 2매까지 구매 가능합니다."),
+    GROUP_HOLD_LOCK_TIMEOUT(HttpStatus.CONFLICT, "좌석 선택이 몰려 처리하지 못했습니다. 잠시 후 다시 시도해주세요."),
     ACTIVE_HOLD_NOT_FOUND(HttpStatus.NOT_FOUND, "결제를 요청할 좌석 홀드가 없습니다. 다시 선택해주세요."),
     DUPLICATE_PAYMENT_REQUEST(HttpStatus.CONFLICT, "이미 처리 중인 결제 요청입니다."),
     RESERVATION_NOT_FOUND(HttpStatus.NOT_FOUND, "예약을 찾을 수 없습니다."),

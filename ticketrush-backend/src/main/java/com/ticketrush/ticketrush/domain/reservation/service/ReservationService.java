@@ -21,7 +21,9 @@ import com.ticketrush.ticketrush.domain.seat.service.SeatService;
 import com.ticketrush.ticketrush.global.exception.BusinessException;
 import com.ticketrush.ticketrush.global.exception.ErrorCode;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -86,7 +88,7 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.DUPLICATE_PAYMENT_REQUEST);
         }
 
-        int quantity = activeHold.isSeat() ? 1 : activeHold.quantity();
+        int quantity = activeHold.isSeat() ? activeHold.seatIds().size() : activeHold.quantity();
         int amount = section.getPrice() * quantity;
 
         Reservation reservation;
@@ -101,15 +103,19 @@ public class ReservationService {
         if (activeHold.isSeat()) {
             // db-schema.md 6번 uq_active_seat를 대체하는 애플리케이션 레벨 2차 방어선(사용자 확인 완료).
             // 정상 흐름에서는 Redis 좌석 홀드가 이미 동시성을 막아줘서 여기 걸릴 일이 없다.
-            if (reservationSeatRepository.existsBySeatIdAndStatusIn(activeHold.seatId(), ACTIVE_STATUSES)) {
-                throw new BusinessException(ErrorCode.SEAT_ALREADY_HELD);
+            for (Long seatId : activeHold.seatIds()) {
+                if (reservationSeatRepository.existsBySeatIdAndStatusIn(seatId, ACTIVE_STATUSES)) {
+                    throw new BusinessException(ErrorCode.SEAT_ALREADY_HELD);
+                }
             }
-            Seat seat = seatRepository.findById(activeHold.seatId())
-                    .orElseThrow(() -> new BusinessException(ErrorCode.SEAT_NOT_FOUND));
-            reservationSeatRepository.save(ReservationSeat.of(reservation, seat));
+            List<Seat> seats = seatRepository.findAllById(activeHold.seatIds());
+            if (seats.size() != activeHold.seatIds().size()) {
+                throw new BusinessException(ErrorCode.SEAT_NOT_FOUND);
+            }
+            seats.forEach(seat -> reservationSeatRepository.save(ReservationSeat.of(reservation, seat)));
         }
 
-        seatService.reschedulePaymentTimeout(accountId, eventId, activeHold.sectionId(), activeHold.seatId(),
+        seatService.reschedulePaymentTimeout(accountId, eventId, activeHold.sectionId(), activeHold.seatIds(),
                 quantity, Duration.ofMillis(paymentProcessingTimeoutMillis));
 
         return ReservationResponse.of(reservation);
@@ -128,9 +134,9 @@ public class ReservationService {
         List<ReservationSeat> seats = reservationSeatRepository.findAllByReservationId(reservationId);
         seats.forEach(ReservationSeat::confirm);
 
-        Long seatId = seats.isEmpty() ? null : seats.get(0).getSeat().getId();
+        List<Long> seatIds = seats.stream().map(rs -> rs.getSeat().getId()).toList();
         seatService.confirmHold(reservation.getAccount().getId(), reservation.getEvent().getId(),
-                reservation.getSection().getId(), seatId, reservation.getQuantity());
+                reservation.getSection().getId(), seatIds, reservation.getQuantity());
     }
 
     /** 보상 1단계: PAYMENT_REQUESTED → PAYMENT_FAILED. */
@@ -156,9 +162,9 @@ public class ReservationService {
         List<ReservationSeat> seats = reservationSeatRepository.findAllByReservationId(reservationId);
         seats.forEach(ReservationSeat::release);
 
-        Long seatId = seats.isEmpty() ? null : seats.get(0).getSeat().getId();
+        List<Long> seatIds = seats.stream().map(rs -> rs.getSeat().getId()).toList();
         seatService.compensate(reservation.getAccount().getId(), reservation.getEvent().getId(),
-                reservation.getSection().getId(), seatId, reservation.getQuantity());
+                reservation.getSection().getId(), seatIds, reservation.getQuantity());
 
         reservation.release();
     }
@@ -169,8 +175,8 @@ public class ReservationService {
             throw new BusinessException(ErrorCode.INVALID_INPUT, "요청한 구역이 현재 홀드와 일치하지 않습니다.");
         }
         if (hold.isSeat()) {
-            if (request.seatIds() == null || request.seatIds().size() != 1
-                    || !request.seatIds().get(0).equals(hold.seatId())) {
+            Set<Long> requestedSeatIds = request.seatIds() == null ? Set.of() : new HashSet<>(request.seatIds());
+            if (!requestedSeatIds.equals(new HashSet<>(hold.seatIds()))) {
                 throw new BusinessException(ErrorCode.INVALID_INPUT, "요청한 좌석이 현재 홀드와 일치하지 않습니다.");
             }
         } else if (request.quantity() == null || !request.quantity().equals(hold.quantity())) {

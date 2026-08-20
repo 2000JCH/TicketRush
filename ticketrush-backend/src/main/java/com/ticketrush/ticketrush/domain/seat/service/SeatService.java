@@ -12,6 +12,7 @@ import com.ticketrush.ticketrush.domain.seat.dto.SeatHoldRequest;
 import com.ticketrush.ticketrush.domain.seat.dto.SeatHoldResponse;
 import com.ticketrush.ticketrush.domain.seat.dto.SeatStatusResponse;
 import com.ticketrush.ticketrush.domain.seat.entity.SeatState;
+import com.ticketrush.ticketrush.domain.seat.lock.GroupHoldLockStrategy;
 import com.ticketrush.ticketrush.domain.seat.repository.ActiveReservationRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.HoldRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.HoldScheduleRepository;
@@ -22,6 +23,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -32,12 +35,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 좌석 상태 모델 — 단일 좌석 홀드 흐름 + 홀드 TTL/만료 처리(decisions.md 1번, api-design.md 4번,
- * redis-design.md 4·4-1번). `reschedulePaymentTimeout`/`confirmHold`/`compensate`는
- * `ReservationService`(Saga 상태머신)가 결제 요청/확정/실패 시점에 호출한다.
+ * 좌석 상태 모델 — 단일/그룹(2매) 좌석 홀드 흐름 + 홀드 TTL/만료 처리(decisions.md 1·2번,
+ * api-design.md 4번, redis-design.md 4·4-1번). `reschedulePaymentTimeout`/`confirmHold`/
+ * `compensate`는 `ReservationService`(Saga 상태머신)가 결제 요청/확정/실패 시점에 호출한다.
  *
- * 이 단계에서 다루지 않는 것(사용자 확인 완료, 다음 단계로 미룸):
- * - 그룹 홀드(좌석 2개 동시 선택): 분산락 벤치마크(decisions.md 2번) 이후 구현
+ * 그룹 홀드(좌석 2개 동시 선택)는 `GroupHoldLockStrategy`(Redisson RLock 또는 DB 비관적 락,
+ * `group-hold.lock-strategy` 프로퍼티로 전환)로 동시성을 제어한다 — 어느 쪽을 최종 채택할지는
+ * 3주차 Gatling 실측 비교 후 결정한다(decisions.md 2번, 사용자 확인 완료).
  */
 @Slf4j
 @Service
@@ -58,6 +62,7 @@ public class SeatService {
     private final HoldScheduleRepository holdScheduleRepository;
     private final ReservationRepository reservationRepository;
     private final QueueService queueService;
+    private final GroupHoldLockStrategy groupHoldLockStrategy;
     private final Duration holdTtl;
 
     public SeatService(
@@ -70,6 +75,7 @@ public class SeatService {
             HoldScheduleRepository holdScheduleRepository,
             ReservationRepository reservationRepository,
             QueueService queueService,
+            GroupHoldLockStrategy groupHoldLockStrategy,
             @Value("${seat.hold-ttl-millis}") long holdTtlMillis) {
         this.eventRepository = eventRepository;
         this.sectionRepository = sectionRepository;
@@ -80,6 +86,7 @@ public class SeatService {
         this.holdScheduleRepository = holdScheduleRepository;
         this.reservationRepository = reservationRepository;
         this.queueService = queueService;
+        this.groupHoldLockStrategy = groupHoldLockStrategy;
         this.holdTtl = Duration.ofMillis(holdTtlMillis);
     }
 
@@ -142,33 +149,66 @@ public class SeatService {
     }
 
     private SeatHoldResponse holdSeat(Long accountId, Long eventId, SeatHoldRequest request) {
-        List<Long> seatIds = request.seatIds();
-        if (seatIds.size() > 1) {
-            // 그룹 홀드는 분산락 벤치마크(decisions.md 2번) 이후 단계에서 구현한다.
-            throw new BusinessException(ErrorCode.INVALID_INPUT,
-                    "동시에 2개 이상의 좌석을 선택하는 기능은 아직 지원하지 않습니다.");
-        }
-        Long seatId = seatIds.get(0);
-        Seat seat = seatRepository.findById(seatId)
-                .orElseThrow(() -> new BusinessException(ErrorCode.SEAT_NOT_FOUND));
-        if (!seat.getSection().getId().equals(request.sectionId())
-                || !seat.getSection().getEvent().getId().equals(eventId)) {
-            throw new BusinessException(ErrorCode.SEAT_NOT_FOUND);
-        }
+        List<Long> seatIds = validateSeatIds(request.seatIds());
+        validateSeatsBelongToSection(eventId, request.sectionId(), seatIds);
 
-        checkAntiScalping(accountId, eventId, 1);
-        HoldRecord record = HoldRecord.forSeat(eventId, accountId, request.sectionId(), seatId);
+        checkAntiScalping(accountId, eventId, seatIds.size());
+        HoldRecord record = HoldRecord.forSeats(eventId, accountId, request.sectionId(), seatIds);
         startActiveReservation(accountId, eventId, record);
 
-        if (!seatStatusRepository.holdSeat(eventId, seatId)) {
+        try {
+            if (seatIds.size() == 1) {
+                holdSeatsOrRollback(eventId, seatIds);
+            } else {
+                // 그룹 홀드(decisions.md 2번) — 두 좌석 다 잡거나 둘 다 실패하도록 락으로 감싼다.
+                groupHoldLockStrategy.withLock(eventId, seatIds, () -> holdSeatsOrRollback(eventId, seatIds));
+            }
+        } catch (BusinessException e) {
             activeReservationRepository.end(eventId, accountId);
-            throw new BusinessException(ErrorCode.SEAT_ALREADY_HELD);
+            throw e;
         }
 
         long expiresAtEpochMilli = System.currentTimeMillis() + holdTtl.toMillis();
-        holdRepository.holdSeat(eventId, seatId, accountId, holdTtl);
+        seatIds.forEach(seatId -> holdRepository.holdSeat(eventId, seatId, accountId, holdTtl));
         holdScheduleRepository.schedule(record.encode(), expiresAtEpochMilli);
         return SeatHoldResponse.held(toLocalDateTime(expiresAtEpochMilli));
+    }
+
+    /** 좌석 하나라도 이미 HELD면 그때까지 잡은 좌석을 즉시 롤백한다(전부 성공 또는 전부 실패). */
+    private void holdSeatsOrRollback(Long eventId, List<Long> seatIds) {
+        List<Long> held = new ArrayList<>();
+        for (Long seatId : seatIds) {
+            if (!seatStatusRepository.holdSeat(eventId, seatId)) {
+                held.forEach(id -> seatStatusRepository.releaseSeat(eventId, id));
+                throw new BusinessException(ErrorCode.SEAT_ALREADY_HELD);
+            }
+            held.add(seatId);
+        }
+    }
+
+    private List<Long> validateSeatIds(List<Long> seatIds) {
+        if (seatIds == null || seatIds.isEmpty() || seatIds.size() > MAX_QUANTITY_PER_REQUEST) {
+            throw new BusinessException(ErrorCode.INVALID_INPUT,
+                    "seatIds는 1개 이상 " + MAX_QUANTITY_PER_REQUEST + "개 이하여야 합니다.");
+        }
+        List<Long> sorted = seatIds.stream().distinct().sorted().toList();
+        if (sorted.size() != seatIds.size()) {
+            throw new BusinessException(ErrorCode.INVALID_INPUT, "중복된 좌석입니다.");
+        }
+        return sorted;
+    }
+
+    private void validateSeatsBelongToSection(Long eventId, Long sectionId, List<Long> seatIds) {
+        List<Seat> seats = seatRepository.findAllById(seatIds);
+        if (seats.size() != seatIds.size()) {
+            throw new BusinessException(ErrorCode.SEAT_NOT_FOUND);
+        }
+        boolean allMatch = seats.stream().allMatch(seat ->
+                seat.getSection().getId().equals(sectionId)
+                        && seat.getSection().getEvent().getId().equals(eventId));
+        if (!allMatch) {
+            throw new BusinessException(ErrorCode.SEAT_NOT_FOUND);
+        }
     }
 
     private SeatHoldResponse holdStanding(Long accountId, Long eventId, SeatHoldRequest request) {
@@ -205,24 +245,24 @@ public class SeatService {
     public Optional<ActiveHold> findActiveHold(Long eventId, Long accountId) {
         return activeReservationRepository.find(eventId, accountId)
                 .map(HoldRecord::parse)
-                .map(record -> new ActiveHold(record.sectionId(), record.seatId(), record.quantity()));
+                .map(record -> new ActiveHold(record.sectionId(), record.seatIds(), record.quantity()));
     }
 
     /**
      * 결제 요청 시점에 스케줄을 결제 처리 타임아웃으로 재조정한다(redis-design.md 4-1번 —
      * 원래 설계의 "TTL 재설정"에 대응하는 `ZADD` upsert). `hold`/`active_reservation` 키의
-     * 보조 TTL도 같은 타임아웃으로 함께 갱신한다.
+     * 보조 TTL도 같은 타임아웃으로 함께 갱신한다. seatIds가 비어있으면 스탠딩 홀드로 취급한다.
      */
     public LocalDateTime reschedulePaymentTimeout(
-            Long accountId, Long eventId, Long sectionId, Long seatId, int quantity, Duration timeout) {
-        HoldRecord record = seatId != null
-                ? HoldRecord.forSeat(eventId, accountId, sectionId, seatId)
+            Long accountId, Long eventId, Long sectionId, List<Long> seatIds, int quantity, Duration timeout) {
+        HoldRecord record = isSeatHold(seatIds)
+                ? HoldRecord.forSeats(eventId, accountId, sectionId, seatIds)
                 : HoldRecord.forStanding(eventId, accountId, sectionId, quantity);
 
         long expiresAtEpochMilli = System.currentTimeMillis() + timeout.toMillis();
         holdScheduleRepository.schedule(record.encode(), expiresAtEpochMilli);
         if (record.seat()) {
-            holdRepository.holdSeat(eventId, seatId, accountId, timeout);
+            seatIds.forEach(seatId -> holdRepository.holdSeat(eventId, seatId, accountId, timeout));
         } else {
             holdRepository.holdStanding(eventId, accountId, sectionId, quantity, timeout);
         }
@@ -236,14 +276,14 @@ public class SeatService {
      * (redis-design.md 3번) — `hold`/`active_reservation` 키는 더 이상 아무 코드도 읽지 않는
      * 보조 기록일 뿐이라 정리 차원에서 지운다.
      */
-    public void confirmHold(Long accountId, Long eventId, Long sectionId, Long seatId, int quantity) {
-        HoldRecord record = seatId != null
-                ? HoldRecord.forSeat(eventId, accountId, sectionId, seatId)
+    public void confirmHold(Long accountId, Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        HoldRecord record = isSeatHold(seatIds)
+                ? HoldRecord.forSeats(eventId, accountId, sectionId, seatIds)
                 : HoldRecord.forStanding(eventId, accountId, sectionId, quantity);
 
         holdScheduleRepository.unschedule(record.encode());
         if (record.seat()) {
-            holdRepository.releaseSeat(eventId, seatId);
+            seatIds.forEach(seatId -> holdRepository.releaseSeat(eventId, seatId));
         } else {
             holdRepository.releaseStanding(eventId, accountId, sectionId);
         }
@@ -251,25 +291,31 @@ public class SeatService {
     }
 
     /** 결제 실패 시 Saga 보상 — 좌석/스탠딩을 원상복구한다(ReservationService가 호출). */
-    public void compensate(Long accountId, Long eventId, Long sectionId, Long seatId, int quantity) {
-        HoldRecord record = seatId != null
-                ? HoldRecord.forSeat(eventId, accountId, sectionId, seatId)
+    public void compensate(Long accountId, Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        HoldRecord record = isSeatHold(seatIds)
+                ? HoldRecord.forSeats(eventId, accountId, sectionId, seatIds)
                 : HoldRecord.forStanding(eventId, accountId, sectionId, quantity);
         releaseHold(accountId, eventId, record);
     }
 
-    /** 계정이 이벤트에 대해 현재 진행 중인 홀드(결제 요청 대상). seatId가 null이면 스탠딩. */
-    public record ActiveHold(Long sectionId, Long seatId, int quantity) {
+    private boolean isSeatHold(List<Long> seatIds) {
+        return seatIds != null && !seatIds.isEmpty();
+    }
+
+    /** 계정이 이벤트에 대해 현재 진행 중인 홀드(결제 요청 대상). seatIds가 비어있으면 스탠딩. */
+    public record ActiveHold(Long sectionId, List<Long> seatIds, int quantity) {
         public boolean isSeat() {
-            return seatId != null;
+            return seatIds != null && !seatIds.isEmpty();
         }
     }
 
     /** 명시적 해제와 만료 스케줄 처리가 공유하는 롤백 로직. */
     private void releaseHold(Long accountId, Long eventId, HoldRecord record) {
         if (record.seat()) {
-            seatStatusRepository.releaseSeat(eventId, record.seatId());
-            holdRepository.releaseSeat(eventId, record.seatId());
+            record.seatIds().forEach(seatId -> {
+                seatStatusRepository.releaseSeat(eventId, seatId);
+                holdRepository.releaseSeat(eventId, seatId);
+            });
         } else {
             seatStatusRepository.releaseStanding(eventId, record.sectionId(), record.quantity());
             holdRepository.releaseStanding(eventId, accountId, record.sectionId());
@@ -315,24 +361,27 @@ public class SeatService {
     /**
      * 홀드 1건을 나타내는 인코딩. `active_reservation` 키의 값과 `hold_schedule`의 member로 동일한
      * 문자열을 그대로 재사용한다(redis-design.md 4-1·8번) — 두 곳이 서로 다른 인코딩을 쓰면 어긋날
-     * 위험이 있어, 단일 소스로 통일했다.
+     * 위험이 있어, 단일 소스로 통일했다. 그룹 홀드(decisions.md 2번)라 좌석이 최대 2개일 수 있어
+     * seatId 하나가 아니라 쉼표로 구분한 목록을 담는다.
      *
-     * 형식: "SEAT:{eventId}:{accountId}:{sectionId}:{seatId}" / "STANDING:{eventId}:{accountId}:{sectionId}:{quantity}"
+     * 형식: "SEAT:{eventId}:{accountId}:{sectionId}:{seatId1}[,{seatId2}]" /
+     * "STANDING:{eventId}:{accountId}:{sectionId}:{quantity}"
      */
     private record HoldRecord(
-            boolean seat, Long eventId, Long accountId, Long sectionId, Long seatId, int quantity) {
+            boolean seat, Long eventId, Long accountId, Long sectionId, List<Long> seatIds, int quantity) {
 
-        static HoldRecord forSeat(Long eventId, Long accountId, Long sectionId, Long seatId) {
-            return new HoldRecord(true, eventId, accountId, sectionId, seatId, 0);
+        static HoldRecord forSeats(Long eventId, Long accountId, Long sectionId, List<Long> seatIds) {
+            return new HoldRecord(true, eventId, accountId, sectionId, seatIds, 0);
         }
 
         static HoldRecord forStanding(Long eventId, Long accountId, Long sectionId, int quantity) {
-            return new HoldRecord(false, eventId, accountId, sectionId, null, quantity);
+            return new HoldRecord(false, eventId, accountId, sectionId, List.of(), quantity);
         }
 
         String encode() {
             return seat
-                    ? "SEAT:" + eventId + ":" + accountId + ":" + sectionId + ":" + seatId
+                    ? "SEAT:" + eventId + ":" + accountId + ":" + sectionId + ":"
+                            + String.join(",", seatIds.stream().map(String::valueOf).toList())
                     : "STANDING:" + eventId + ":" + accountId + ":" + sectionId + ":" + quantity;
         }
 
@@ -343,9 +392,10 @@ public class SeatService {
             Long accountId = Long.valueOf(parts[2]);
             Long sectionId = Long.valueOf(parts[3]);
             if (isSeat) {
-                return new HoldRecord(true, eventId, accountId, sectionId, Long.valueOf(parts[4]), 0);
+                List<Long> seatIds = Arrays.stream(parts[4].split(",")).map(Long::valueOf).toList();
+                return new HoldRecord(true, eventId, accountId, sectionId, seatIds, 0);
             }
-            return new HoldRecord(false, eventId, accountId, sectionId, null, Integer.parseInt(parts[4]));
+            return new HoldRecord(false, eventId, accountId, sectionId, List.of(), Integer.parseInt(parts[4]));
         }
     }
 }
