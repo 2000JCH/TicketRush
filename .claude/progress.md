@@ -10,7 +10,7 @@
 
 **사재기 방지 정책 확정 및 스키마 재작업 완료**: 계정당 이벤트별 동시 진행 예약 1건 제한(Redis `active_reservation:{eventId}:{accountId}`) + 한 예약(그룹 홀드 포함)당 최대 2매 + 이벤트당 누적 확정 매수 최대 2매, 3중으로 사재기를 막기로 확정. 이 과정에서 그룹 홀드(분산락 벤치마크 대상)를 없앨지 논의했으나 **분산락 벤치마크(decisions.md 2번)를 유지하는 쪽으로 확정** — "좌석 개수 제한"이 아니라 "동시 진행 시도 개수 제한"으로 사재기 방지를 재해석해서 그룹 홀드 기능과 양립시킴. `reservation` 테이블은 "예약 1건 = 좌석 1개"에서 "예약 1건 = 결제 시도 1건(좌석 1~2개)"으로 재구성하고, 좌석 정보는 자식 테이블 `reservation_seat`로 분리(db-schema.md 5·6번). decisions.md/architecture.md/redis-design.md/api-design.md 전부 반영 완료.
 
-**ADMIN 모니터링 기능 확정**: `GET /api/v1/admin/events/{eventId}/stats`로 판매 현황(확정/진행중 매수)과 좌석 점유율을 조회. 새 데이터를 만들지 않고 기존 Redis(`seat_status:{eventId}`)/DB(`idx_event_status`)를 그대로 읽기만 하며, 화면 자동 갱신(SSE/웹소켓)은 만들지 않고 폴링으로 처리(api-design.md 6번). **모든 설계 문서 1차 완료. 다음은 구현 착수.**
+**ADMIN 모니터링 기능 확정**: `GET /api/v1/admin/events/{eventId}/stats`로 판매 현황(확정/진행중 매수)과 좌석 점유율을 조회. 새 데이터를 만들지 않고 기존 Redis(`seat_status:{eventId}`)/DB(`idx_event_status`)를 그대로 읽기만 하며, 화면 자동 갱신(SSE/웹소켓)은 만들지 않고 폴링으로 처리(api-design.md 6번). **모든 설계 문서 1차 완료.** (이후 1주차 구현이 전부 끝났고 현재 2주차 진행 중 — 아래 "구현 진행 상황" 참고)
 
 ## 문서화 진행 상황 (`.claude/docs/`)
 
@@ -22,7 +22,7 @@
 | `redis-design.md` | 작성 완료 | classq 스타일(키별 블록 + 전체 요약 표)로 통일 |
 | `api-design.md` | 작성 완료 | classq 스타일(도메인별 표+JSON 예시+에러코드 표)로 통일 |
 | `progress.md` | 이 문서 | |
-| `../portfolio.md` | 작성 시작 | 이력서/포트폴리오용 "문제와 해결" 소재 모음(`.claude/portfolio.md`). 2026-08-16 생성, 현재 3건 수록 + 앞으로 나올 소재 목록 |
+| `../portfolio.md` | 작성 시작 | 이력서/포트폴리오용 "문제와 해결" 소재 모음(`.claude/portfolio.md`). 2026-08-16 생성, 현재 4건 수록 + 앞으로 나올 소재 목록 |
 
 ## 구현 진행 상황
 
@@ -52,9 +52,30 @@
   - **확인된 것**: 콘솔의 "호출 테스트"는 서명 헤더(`webhook-signature` 등) 없이 온다 — 연결 확인용이라 그런 것으로 보이며, 실제 결제 이벤트 웹훅에 서명이 실리는지는 3주차에 실결제로 재확인 필요.
   - **아직 안 한 것**: 웹훅 시크릿(`PORTONE_WEBHOOK_SECRET`) 미발급 상태로 남겨둠 — 서명 검증이 실제로 필요해지는 3주차에 발급해도 늦지 않다고 판단(사용자 확인 완료).
 
+- **2026-08-19**: **좌석 상태 모델(단일 좌석 흐름) 완료 (2주차 첫 항목)**. `GET /events/{id}/seats?sectionId=`(좌석 상태 조회), `POST /events/{id}/seats/holds`(홀드), `DELETE /events/{id}/seats/holds`(해제). 만든 것: `SeatStatusRepository` 확장(`holdSeat`/`releaseSeat`/`holdStanding`/`releaseStanding`/`findSeatStatuses`), `HoldRepository`(redis-design.md 4번 `hold:*` 키), `ActiveReservationRepository`(8번 `active_reservation:*` 키), `SeatService`, `SeatController`, `QueueService.validateEntryToken`(좌석/결제 API 공통 `X-Entry-Token` 검증, api-design.md 공통 규칙), `Reservation`/`ReservationStatus` 엔티티 + `ReservationRepository`(누적 확정 매수 조회 전용으로 최소 컬럼만 미리 생성 — 실제 INSERT는 Saga 단계에서 구현).
+  - **이번 단계 범위(사용자 확인 완료, 전부 다음 단계로 명시적으로 미룸)**: (1) 그룹 홀드(좌석 2개)는 구현하지 않고 `seatIds` 2개 요청은 `INVALID_INPUT`으로 거절 — 분산락 벤치마크(decisions.md 2번) 이후 구현. (2) 홀드 TTL 부여·만료 시 Keyspace Notification Consumer·`hold`/`active_reservation` 키 3단계 TTL 재설정은 전혀 구현하지 않음 — 지금은 두 키 모두 TTL 없이 생성되고 `DELETE .../seats/holds`로 명시적 해제해야만 지워진다("홀드 TTL/만료 처리" 단계에서 구현). (3) 사재기 방지 3중 규칙(`ACTIVE_RESERVATION_EXISTS`/`QUANTITY_LIMIT_EXCEEDED` 2종)은 이번에 포함 — 세 번째 규칙(이벤트당 누적 확정 2매)을 위해 `reservation` 테이블을 이번에 최소 컬럼으로 미리 만들었고, 결제 연동 전이라 지금은 항상 0건으로 통과한다(3주차부터 실제 값이 쌓임, 정상).
+  - **구현 단계에서 단순화한 것(decisions.md 1번 반영)**: 지정석의 `AVAILABLE → HELD` 원자 전이를 원래 설계대로 Lua 스크립트가 아니라 `HSETNX`(필드 없을 때만 쓰는 단일 명령)로 구현했다 — Redis 싱글 스레드 특성상 이미 원자적이라 Lua가 굳이 필요 없었다. 동일한 보장을 더 단순하게 얻은 것.
+  - **`active_reservation` 키 값 인코딩을 이번에 확정**: `"SEAT:{sectionId}:{seatId}"` / `"STANDING:{sectionId}:{quantity}"` — 홀드 해제(`DELETE`) 시 이 값만 보고 무엇을 되돌릴지 판단한다(redis-design.md 8번 반영).
+  - Node.js 스크립트로 20여 개 시나리오 검증 완료(로컬에 Python이 Windows Store stub만 있어 curl 대신 fetch 기반 스크립트 사용) — 대기열 통과 후 좌석 상태 조회/홀드/해제 전체 흐름, `X-Entry-Token` 없음(`ENTRY_TOKEN_REQUIRED`)·위조(`ENTRY_TOKEN_EXPIRED`) 거절, 좌석 홀드 성공 후 다른 계정 재홀드 거절(`SEAT_ALREADY_HELD`), 같은 계정 동시 진행 거절(`ACTIVE_RESERVATION_EXISTS`), 그룹 홀드 요청 거절(`INVALID_INPUT`), 존재하지 않는 좌석(`SEAT_NOT_FOUND`), 해제 후 좌석이 다시 AVAILABLE로 조회되는지, 스탠딩 2매 홀드 후 이벤트 상세의 `remainingQuantity` 반영, 3매 요청 거절(`QUANTITY_LIMIT_EXCEEDED`), 스탠딩 매진(`STANDING_SOLD_OUT`)과 실패 시 잔여수량이 정확히 롤백되는지까지 확인. `gradlew.bat test` 통과(Reservation 엔티티 추가로 인한 스키마 변경도 `ddl-auto=update`로 문제없이 반영됨).
+  - **참고(로컬 환경)**: 테스트 중 포트 3306을 다른 프로젝트의 컨테이너(`mysql-container`)가 선점해 `ticketrush-mysql`이 기동하지 못한 걸 발견 — 사용자 확인 후 그 컨테이너를 멈추고 진행함(TicketRush와 무관한 컨테이너라 삭제는 하지 않고 정지만 함).
+
+- **2026-08-19**: **홀드 TTL/만료 처리 완료 (2주차 두 번째 항목)**. 만든 것: `HoldScheduleRepository`(redis-design.md 4-1번 신규 키 `hold_schedule`), `HoldExpiryScheduler`(`queue.admit-interval-millis`와 동일한 `@Scheduled` 폴링 패턴), `HoldRepository`/`ActiveReservationRepository`에 TTL 인자 추가, `SeatService`에 `HoldRecord`(홀드 1건을 나타내는 통합 인코딩)와 `releaseExpiredHolds()` 추가. `SeatHoldResponse.holdExpiresAt`이 이제 항상 실제 값을 반환한다(직전 단계에선 항상 `null`).
+  - **설계를 원래 문서(redis-design.md 4번 Keyspace Notification)와 다르게 구현함(사용자와 논의 후 확정)**: Redis Keyspace Notification 대신 "만료 시각순 정렬 집합(`hold_schedule`, Sorted Set) + 주기적 스케줄러" 방식으로 재설계했다. 이유 두 가지를 사용자와 논의로 짚어냄 — (1) Keyspace Notification은 pub/sub라 앱이 그 순간 재시작 중이면 이벤트가 재전송 없이 영구 유실되어, 실제로는 아무도 안 잡고 있는데 영원히 HELD로 남는 "유령 좌석"이 생길 수 있음. (2) `expired` 이벤트는 만료된 키 "이름"만 주고 그 시점엔 값이 이미 사라진 뒤라, 스탠딩 홀드를 되돌리는 데 필요한 quantity를 읽을 방법이 없었음. `hold_schedule`의 member 문자열(`HoldRecord.encode()`) 자체에 롤백에 필요한 정보(eventId/accountId/sectionId/seatId 또는 quantity)를 전부 담아 두 문제를 모두 피했다. 이 member 인코딩은 `active_reservation` 키의 값과도 동일한 문자열을 공유해(단일 소스) 두 곳이 어긋날 위험을 없앴다.
+  - **명시적 해제가 반드시 스케줄도 함께 지워야 하는 이유를 검증으로 확인**: 사용자 A가 좌석을 풀고 사용자 B가 같은 좌석을 새로 잡은 뒤, A의 원래 스케줄 항목이 남아있었다면 뒤늦게 발동해 B의 새 홀드를 잘못 해제했을 것이다 — `SeatService.release()`가 `holdScheduleRepository.unschedule()`도 함께 호출하도록 구현하고, 이 시나리오를 정확히 재현하는 시간차 테스트로 검증 완료(A의 원래 만료 시점은 지나되 B의 새 만료 시점 전인 구간에서 B의 홀드가 멀쩡히 유지되는지 확인).
+  - **Redis AOF/RDB를 문서 원안대로 껐다(사용자 확인 완료)**: `docker-compose.yml`의 Redis가 `--appendonly yes`로 이미 켜져 있어 redis-design.md("AOF/RDB 영속성 옵션은 켜지 않는다")와 모순됐던 걸 발견 — "결제 중간에 날아가면 어떡하나"는 우려로 켜둔 것으로 보이나, 실제로 결제 진행 중 상태를 지키는 건 Redis 영속성이 아니라 "결제 요청 시점부터 MySQL에 동기 INSERT + Redis 재시작 시 MySQL 기준 rebuild"(decisions.md 1·5번, 이미 있던 장치)라 AOF/RDB가 그 역할을 하지 않는다고 설명해 정리함. `--save ""`까지 추가해 이미지 기본 RDB 스냅샷도 껐다(`CONFIG GET appendonly`/`save`로 둘 다 꺼졌음을 확인).
+  - Node.js 스크립트로 홀드 TTL을 8초로 낮춰 기동한 앱에 대해 검증(운영 기본값 10분은 실제로 기다리기엔 너무 길어 테스트 환경변수로만 단축, `application.properties` 기본값은 그대로 둠): 홀드 성공 시 `holdExpiresAt`이 실제 미래 시각으로 채워짐, 방치된 좌석 홀드가 TTL+스케줄러 주기 뒤 자동으로 AVAILABLE 복귀, `active_reservation`도 함께 정리되어 재홀드 가능, 명시적 해제가 스케줄을 확실히 지워 늦게 도착한 옛 스케줄이 새 홀드를 잘못 풀지 않음, 스탠딩 홀드도 만료 시 잔여수량이 정확히 복구됨. `gradlew.bat test` 통과.
+  - **다음 단계로 미룬 것**: 결제 요청 시 스케줄 재조정(`ZADD`로 결제 처리 타임아웃 시각으로 덮어쓰기)·결제 확정 시 스케줄 완전 제거(`ZREM`, 원래 설계의 `PERSIST`에 대응) 연동은 결제 API 자체가 아직 없어 Saga/결제 연동 단계에서 이어서 구현한다. 결제 처리 타임아웃 수치도 여전히 미정.
+
+- **2026-08-19**: **Saga 상태머신 완료 (2주차 세 번째 항목)**. 만든 것: `ReservationSeat`/엔티티 완성(`Reservation.request/confirm/fail/release`, `ReservationSeat.of/confirm/release`), `ReservationSeatRepository`(`existsBySeatIdAndStatusIn`으로 db-schema.md 6번 `uq_active_seat`를 애플리케이션 레벨로 대체), `IdempotencyRepository`(redis-design.md 5번), `ReservationService`(`requestPayment`/`confirmPayment`/`markPaymentFailed`/`releaseAfterFailure`), `POST /api/v1/reservations` API. `SeatService`에 `findActiveHold`/`reschedulePaymentTimeout`/`confirmHold`/`compensate` 공개 메서드를 추가해 `ReservationService`가 좌석 도메인과 연동한다.
+  - **이번 단계 범위(사용자 확인 완료)**: `requestPayment`는 `PAYMENT_REQUESTED` 행만 만들고 **실제 PG(포트원) 호출은 하지 않는다** — 실제 웹훅 서명 검증·Kafka exactly-once는 3주차 "결제 연동"에 그대로 남겨둠. `confirmPayment`/`markPaymentFailed`/`releaseAfterFailure`를 실제로 트리거할 PG 웹훅이 없어, 이 메서드들을 직접 호출하는 **JUnit 자동 테스트(`ReservationServiceTest`, 8개 케이스)로 검증** — 이 프로젝트의 첫 자동 테스트 도입(그동안 인증/대기열/좌석 도메인은 수동 curl/Node 스크립트 검증만 해왔음). `GET /reservations/me`, `GET /reservations/{id}`, 취소 API도 3주차로 미룸.
+  - **`markPaymentFailed`/`releaseAfterFailure`를 두 개 메서드로 분리한 이유**: decisions.md 5번의 Choreography(Kafka Consumer 기반)에서는 `PAYMENT_REQUESTED → PAYMENT_FAILED`와 "좌석 반납 + `→ SEAT_RELEASED`"가 서로 다른 트랜잭션(별도 Consumer 처리)이 될 예정이라, 지금부터 독립된 메서드로 나눠두면 3주차에 Kafka Consumer가 각각을 호출하도록 이어붙이기만 하면 된다.
+  - **`reservation_seat`의 생성 컬럼(`active_seat_id`)·CHECK 제약 처리를 확정(CLAUDE.md에 예고돼 있던 결정, 사용자 확인 완료)**: Flyway를 도입하지 않고 `ddl-auto=update`를 계속 쓰기로 하고, 대신 `ReservationSeatRepository.existsBySeatIdAndStatusIn`로 애플리케이션 레벨에서 "같은 좌석에 진행 중인 예약이 이미 있는지"를 검사하는 2차 방어선을 뒀다(정상 흐름에서는 Redis 좌석 홀드가 이미 막아줘서 여기 걸릴 일이 없음).
+  - JUnit 자동 테스트 8개(결제 요청 성공/중복 idempotencyKey 거절/홀드 없이 요청 거절/요청과 홀드 불일치 거절/확정 전이+active_reservation 정리/확정 멱등성/실패→보상→좌석 반납/스탠딩 수량·금액 계산) 전부 통과 + `POST /api/v1/reservations` 실제 HTTP 엔드포인트도 Node 스크립트로 별도 검증(성공/중복 거절/입장 토큰 없음 거절). `gradlew.bat test` 전체 통과.
+  - **다음 단계로 미룬 것**: 실제 PG 호출, 웹훅 서명 검증, Kafka exactly-once 발행, 예약 조회/취소 API — 전부 3주차 "결제 연동". 결제 처리 타임아웃 수치(`payment.processing-timeout-millis`, 지금은 2분 placeholder)도 여전히 미정.
+
 ## 다음 작업 순서
 
-1. **1주차 전체 완료. 2주차 착수**: 좌석 상태 모델(단일 좌석 홀드), 홀드 TTL/만료 처리, Saga 상태머신, 분산락 벤치마크(그룹 좌석 홀드 락 방식 확정). 진행 상황은 위 "구현 진행 상황"에 계속 추가
+1. **2주차 진행 중**: 좌석 상태 모델(단일 좌석 흐름, ✅ 완료) → 홀드 TTL/만료 처리(✅ 완료) → Saga 상태머신(✅ 완료) → 분산락 벤치마크(그룹 좌석 홀드 락 방식 확정). 진행 상황은 위 "구현 진행 상황"에 계속 추가
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
 
@@ -78,6 +99,8 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 **1주차 마무리**: 인증/인가·ADMIN 승인·이벤트/구역/좌석 등록·대기열·포트원 웹훅 스모크테스트까지 모두 완료. 2주차(좌석 상태 모델/홀드 TTL/Saga/분산락 벤치마크)로 진행.
 
+**2026-08-19 세션 마무리**: 2주차 4개 항목 중 3개(좌석 상태 모델, 홀드 TTL/만료 처리, Saga 상태머신) 완료. 남은 건 **분산락 벤치마크** 하나뿐 — 다음 세션에서 이어서 진행. 이 과정에서 나온 부수 결정 2건: (1) Redis 만료 처리를 Keyspace Notification 대신 `hold_schedule` 정렬 집합 방식으로 재설계, `docker-compose.yml` AOF/RDB도 문서 원안대로 끔. (2) 이벤트별 구매 한도(1인 1매/2매) 조직자 설정 기능은 이번 프로젝트 핵심(동시성 제어)과 무관한 CRUD성 기능이라 **보류 확정** — 필요해지면 3주차 후반에 짧게 추가(위 "여유 있을 때 아무 때나 결정 가능" 항목 참고), 4주차엔 넣지 않음.
+
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
 ### 구현 단계에서 확정 (db-schema.md / redis-design.md 작성 중 새로 식별된 항목)
@@ -96,3 +119,4 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 - 성능/처리량 목표치: Gatling 부하테스트 성공 기준(동시접속 N명, P99 응답시간 Xms 등) 미정
 - Outbox 테이블 정리 정책: TTL/배치삭제 정책 — 운영 단계 진입 전 결정 필요
+- **이벤트별 구매 한도(1인 1매/2매) 조직자 설정 기능 — 보류하기로 확정(사용자 확인 완료, 2026-08-19)**: 기술적으로는 단순한 추가(이벤트에 `maxTicketsPerAccount` 컬럼 하나, 좌석 홀드 검증 시 하드코딩된 2매 대신 이 값을 읽도록 변경 — 락/Redis 설계와는 무관)이지만, 이 프로젝트의 핵심(동시성 제어·오버셀 방지·부하/장애 테스트)과 무관한 일반 CRUD성 기능이라 `portfolio.md` 수록 기준에도 안 맞고, 지금은 2주차 분산락 벤치마크가 더 급함. 굳이 넣는다면 3주차 후반(결제 연동 끝나고 카오스/부하테스트 직전)이 그나마 안전한 시점 — 4주차(새 기능 금지 원칙)엔 절대 넣지 않는다.

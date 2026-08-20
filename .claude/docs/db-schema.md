@@ -146,6 +146,8 @@ CREATE TABLE reservation (
 
 **`status`를 부모 `reservation.status`와 별도로 이 테이블에도 둔 이유**: MySQL의 `STORED GENERATED` 컬럼은 같은 행 안의 다른 컬럼만 참조할 수 있어, 부모 테이블의 `status`를 직접 참조하는 생성 컬럼을 자식 테이블에 만들 수 없다. 그래서 `status`를 이 테이블에도 그대로 복제해두고, 상태가 바뀔 때마다 애플리케이션이 `reservation.status`와 `reservation_seat.status`를 **같은 트랜잭션 안에서** 함께 UPDATE한다. 이렇게 하면 예약 이전(decisions.md 5번)에 이미 있던 `active_seat_id` 패턴(같은 좌석에 대해 진행 중인 시도가 동시에 두 개 이상 있는 것을 DB 레벨에서 막는 장치)을 그대로 재사용할 수 있다.
 
+**구현 단계에서 확정(사용자 확인 완료, CLAUDE.md에 예고돼 있던 결정)**: `active_seat_id` 생성 컬럼과 `uq_active_seat` UNIQUE 제약은 `ddl-auto=update`로 표현할 수 없어, Flyway 등 명시적 스키마 관리 도구를 도입하는 대신 **애플리케이션 레벨 검증으로 대체**했다 — `ReservationSeatRepository.existsBySeatIdAndStatusIn(seatId, [PAYMENT_REQUESTED, PAYMENT_CONFIRMED])`로 같은 좌석에 진행 중인 행이 이미 있는지 조회해 2차 방어선 역할을 한다(정상 흐름에서는 Redis 좌석 홀드가 이미 동시성을 막아줘서 여기 걸릴 일이 없다). 그래서 실제 테이블에는 `active_seat_id` 컬럼 자체가 없다 — 아래 CREATE TABLE 문은 여전히 "설계상 의도"를 보여주기 위해 남겨두지만, 실제 엔티티(`ReservationSeat`)는 이 컬럼을 갖지 않는다.
+
 ```sql
 CREATE TABLE reservation_seat (
   id             BIGINT NOT NULL AUTO_INCREMENT,

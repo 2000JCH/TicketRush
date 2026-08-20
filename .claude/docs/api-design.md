@@ -115,6 +115,10 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 
 "몇 매 사겠다"를 사전에 선언받는 화면/API는 두지 않는다 — 실제 매수는 홀드 요청에 담긴 좌석/수량 개수로 정해진다(위 상한 안에서 자유). 대기 화면에 "1인당 최대 2매"라는 안내 문구를 두는 정도로 충분하며, 이건 프론트엔드 영역이라 이 문서에서 다루지 않는다.
 
+**2주차 "좌석 상태 모델(단일 좌석 흐름)" 단계의 구현 범위(사용자 확인 완료)**: `seatIds`가 2개인 그룹 홀드 요청은 아직 지원하지 않는다 — 분산락 벤치마크(decisions.md 2번) 이후 단계에서 구현하며, 지금은 `INVALID_INPUT`으로 거절한다. `GET .../seats`는 `SEATED` 구역만 조회 가능하고 `STANDING` 구역을 지정하면 `INVALID_INPUT`으로 거절한다(잔여 수량은 이벤트 상세 조회로 확인).
+
+**2주차 "홀드 TTL/만료 처리" 단계에서 `holdExpiresAt`이 실제 값으로 채워짐**: 홀드 성공 시 홀드 TTL(`seat.hold-ttl-millis`)만큼 뒤의 시각이 채워진다(redis-design.md 4-1번). 방치된 홀드는 이 시각이 지나면 자동으로 `AVAILABLE`로 돌아간다 — Redis Keyspace Notification이 아니라 "만료 시각순 정렬 집합(`hold_schedule`) + 주기적 스케줄러" 방식으로 처리한다(구현 단계 재설계, 사용자 확인 완료. 이유는 redis-design.md 4-1번 참고).
+
 | 메서드 | 엔드포인트 | 설명 | 권한 |
 |---|---|---|---|
 | GET | /api/v1/events/{eventId}/seats?sectionId={sectionId} | 좌석 상태 조회 | 인증 + 입장 토큰 |
@@ -202,6 +206,10 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 }
 ```
 - `status`는 db-schema.md `reservation.status`와 동일한 값(`PAYMENT_REQUESTED`/`PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED`)이다. `reservationId`는 결제 요청(`POST /api/v1/reservations`) 응답에서 처음 발급된다 — 좌석만 찜한 `SEAT_HELD` 단계는 DB 행이 아직 없어(db-schema.md 설계 원칙 참고) 조회할 `reservationId` 자체가 존재하지 않는다.
+
+**2주차 "Saga 상태머신" 단계의 구현 범위(사용자 확인 완료)**: `POST /api/v1/reservations`만 이번에 구현했다 — `PAYMENT_REQUESTED` 행(과 지정석이면 `reservation_seat`)을 만들고 `hold_schedule`을 결제 처리 타임아웃으로 재조정(redis-design.md 4-1번)하는 것까지만 하고, **실제 PG(포트원) 호출은 하지 않는다**. `POST /api/v1/payments/webhook`, `GET /reservations/me`, `GET /reservations/{id}`, 취소 API는 아직 만들지 않았다 — 실제 웹훅 서명 검증이 없는 상태에서 확정/실패 상태 전이(Saga 보상 포함)를 테스트할 방법이 마땅치 않아, 이번엔 `ReservationService.confirmPayment`/`markPaymentFailed`/`releaseAfterFailure`를 직접 호출하는 자동 테스트(`ReservationServiceTest`, 이 프로젝트 첫 JUnit 자동 테스트)로만 검증했다. 실제 웹훅 컨트롤러가 이 메서드들을 호출하도록 이어붙이는 것과 조회/취소 API는 3주차 "결제 연동"에서 구현한다.
+
+**`markPaymentFailed`/`releaseAfterFailure`로 두 단계 분리(구현 단계에서 확정)**: decisions.md 5번의 Choreography(Kafka Consumer 기반)에서는 이 둘이 서로 다른 트랜잭션(별도 Consumer 처리)이 될 예정이라, 미리 독립된 메서드로 나눠뒀다 — 3주차엔 Kafka Consumer가 각 메서드를 호출하도록 이어붙이기만 하면 된다.
 
 ---
 
