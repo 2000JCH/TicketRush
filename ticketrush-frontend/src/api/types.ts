@@ -93,6 +93,23 @@ export interface ReservationRequestStanding {
 export interface ReservationResponse {
   reservationId: number;
   status: "PAYMENT_REQUESTED";
+  pgPaymentId: string;
+}
+
+export type ReservationStatus =
+  | "PAYMENT_REQUESTED"
+  | "PAYMENT_CONFIRMED"
+  | "PAYMENT_FAILED"
+  | "SEAT_RELEASED";
+
+export interface ReservationDetail {
+  reservationId: number;
+  eventId: number;
+  status: ReservationStatus;
+  quantity: number;
+  amount: number;
+  requestedAt: string;
+  confirmedAt: string | null;
 }
 
 export interface ApiErrorBody {

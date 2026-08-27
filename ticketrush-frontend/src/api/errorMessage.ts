@@ -12,6 +12,7 @@ const MESSAGES: Record<string, string> = {
   ACTIVE_RESERVATION_EXISTS: "이미 진행 중인 예매가 있습니다.",
   QUANTITY_LIMIT_EXCEEDED: "1인당 최대 2매까지 구매할 수 있습니다.",
   EMAIL_ALREADY_EXISTS: "이미 가입된 이메일입니다.",
+  RESERVATION_NOT_CANCELLABLE: "결제 완료된 예약만 취소할 수 있습니다.",
 };
 
 export function formatApiError(error: unknown): string {

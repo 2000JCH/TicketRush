@@ -7,6 +7,7 @@ import { EventListPage } from "./pages/EventListPage";
 import { EventDetailPage } from "./pages/EventDetailPage";
 import { QueuePage } from "./pages/QueuePage";
 import { SeatHoldPage } from "./pages/SeatHoldPage";
+import { ReservationsPage } from "./pages/ReservationsPage";
 
 function App() {
   return (
@@ -43,6 +44,14 @@ function App() {
           element={
             <ProtectedRoute>
               <SeatHoldPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/reservations"
+          element={
+            <ProtectedRoute>
+              <ReservationsPage />
             </ProtectedRoute>
           }
         />

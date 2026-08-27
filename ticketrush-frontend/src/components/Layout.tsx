@@ -19,9 +19,12 @@ export function Layout() {
         {isReady && (
           <nav>
             {isLoggedIn ? (
-              <button onClick={handleLogout} className="link-button">
-                로그아웃
-              </button>
+              <>
+                <Link to="/reservations">내 예약</Link>
+                <button onClick={handleLogout} className="link-button">
+                  로그아웃
+                </button>
+              </>
             ) : (
               <>
                 <Link to="/login">로그인</Link>

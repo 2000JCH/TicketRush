@@ -2,19 +2,28 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getEvent } from "../api/events";
 import { getSeats, holdSeats, releaseHold } from "../api/seats";
-import { requestPayment } from "../api/reservations";
+import { getReservation, requestPayment } from "../api/reservations";
 import { ApiError } from "../api/client";
 import { formatApiError } from "../api/errorMessage";
 import { clearEntryToken, getEntryToken } from "../lib/entryTokenStore";
 import type {
   EventDetail,
   EventSection,
+  ReservationDetail,
   ReservationResponse,
   SeatHoldResponse,
   SeatStatusItem,
 } from "../api/types";
 
 const MAX_QUANTITY = 2;
+const POLL_INTERVAL_MS = 2000;
+
+const RESULT_LABEL: Record<string, string> = {
+  PAYMENT_REQUESTED: "결제 처리 중 — 잠시 후 다시 확인해주세요.",
+  PAYMENT_CONFIRMED: "결제가 완료됐습니다!",
+  PAYMENT_FAILED: "결제가 실패했습니다.",
+  SEAT_RELEASED: "좌석이 반납되었습니다.",
+};
 
 export function SeatHoldPage() {
   const { eventId } = useParams<{ eventId: string }>();
@@ -29,6 +38,7 @@ export function SeatHoldPage() {
   const [standingQuantity, setStandingQuantity] = useState(1);
   const [hold, setHold] = useState<SeatHoldResponse | null>(null);
   const [reservation, setReservation] = useState<ReservationResponse | null>(null);
+  const [result, setResult] = useState<ReservationDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -41,6 +51,32 @@ export function SeatHoldPage() {
       .then(setEvent)
       .catch((err) => setError(formatApiError(err)));
   }, [numericEventId, entryToken, navigate]);
+
+  // 결제 요청 직후 PG 웹훅(또는 카오스 테스트 등)으로 상태가 바뀔 때까지 결과 화면에서 폴링한다.
+  useEffect(() => {
+    if (!reservation || result) return;
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const detail = await getReservation(reservation!.reservationId);
+        if (cancelled) return;
+        if (detail.status !== "PAYMENT_REQUESTED") {
+          setResult(detail);
+        } else {
+          setTimeout(poll, POLL_INTERVAL_MS);
+        }
+      } catch {
+        if (!cancelled) setTimeout(poll, POLL_INTERVAL_MS);
+      }
+    }
+
+    const timer = setTimeout(poll, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [reservation, result]);
 
   function handleExpiredToken() {
     clearEntryToken(numericEventId);
@@ -158,16 +194,19 @@ export function SeatHoldPage() {
   }
 
   if (reservation) {
+    const status = result?.status ?? "PAYMENT_REQUESTED";
     return (
       <div className="page page-narrow">
         <h1>결제 요청 완료</h1>
         <p>예약 번호: {reservation.reservationId}</p>
-        <p>상태: {reservation.status}</p>
-        <p className="muted">
-          실제 결제 승인(포트원 웹훅 연동)은 3주차에 이어붙일 예정이라, 지금은 여기까지만
-          동작합니다.
+        <p>{RESULT_LABEL[status]}</p>
+        {!result && <p className="muted">결제 결과를 자동으로 확인하는 중...</p>}
+        {result && <p className="muted">{result.amount.toLocaleString()}원 · {result.quantity}매</p>}
+        <p>
+          <Link to="/reservations">내 예약 보기</Link>
+          {" · "}
+          <Link to="/">이벤트 목록으로</Link>
         </p>
-        <Link to="/">이벤트 목록으로</Link>
       </div>
     );
   }
