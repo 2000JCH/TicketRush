@@ -122,6 +122,7 @@ CREATE TABLE reservation (
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_idempotency_key (idempotency_key),
+  UNIQUE KEY uq_pg_payment_id (pg_payment_id),
   KEY idx_requested_at (requested_at),
   KEY idx_event_status (event_id, status),
   KEY idx_account_event_status (account_id, event_id, status),
@@ -136,7 +137,7 @@ CREATE TABLE reservation (
 - `quantity`: 좌석 개수(지정석) 또는 구매 수량(스탠딩), 1~2. `CHECK` 제약으로 DB 레벨에서도 상한을 강제한다(MySQL 8.0.16+에서 지원 — 이전 버전이면 애플리케이션 레벨 검증으로 대체).
 - `requested_at`: `PAYMENT_REQUESTED` INSERT 시 함께 기록되며, rebuild(decisions.md 1번)가 "TTL 안 지난 결제 진행 중" 좌석/스탠딩을 판단하는 기준이 되므로 인덱스를 걸었다.
 - `idx_event_status`: rebuild가 이벤트 단위로 "점유 중"(`PAYMENT_CONFIRMED` + TTL 안 지난 `PAYMENT_REQUESTED`) 행을 조회할 때 사용.
-- `pg_payment_id`: 포트원 결제 트랜잭션 식별자. 웹훅 멱등성 자체는 `status` 조회로 판단하지만(decisions.md 5번), PG사 문의·정산 대사 시 참조용으로 저장한다.
+- `pg_payment_id`: **정정(3주차 결제 연동에서 실제 구현하며 바로잡음)** — 포트원이 발급하는 값이 아니라 **merchant(우리 서버)가 결제 요청 시점에 생성해 부여하는 식별자**(`"TICKETRUSH-{reservationId}"`)다. 포트원 V2 결제창 SDK를 호출할 때 프론트가 이 값을 `paymentId`로 그대로 넘기고, 이후 웹훅이 도착하면 payload의 `data.paymentId`로 이 컬럼을 역조회해 어느 예약인지 찾는다(`PaymentWebhookService`) — 그래서 UNIQUE 제약이 필요하다. "포트원이 발급"이라고 썼던 원래 설명은 PG 연동 방식을 오해한 것이었다.
 
 ---
 

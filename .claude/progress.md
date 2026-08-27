@@ -87,7 +87,7 @@
 
 1. **2주차 코드 구현 완료** — 좌석 상태 모델 → 홀드 TTL/만료 처리 → Saga 상태머신 → 분산락 두 방식 구현(Redisson RLock / DB 비관적 락). **단, "분산락 최종 채택"(decisions.md 2번)은 아직 열려있는 항목**이고 3주차 부하 테스트에서 닫는다.
 2. **3주차 착수 전에 2주차 개념·시스템 흐름 복습(사용자 확인 완료, 2026-08-20)** — 3주차에 새로 들어가는 개념(Kafka exactly-once 트랜잭션, 실제 PG 웹훅 서명 검증, EKS/ElastiCache/MSK 등 AWS 인프라, 카오스/부하테스트)이 지금까지보다 낯설어서, 코드부터 치기 전에 2주차에 구현한 좌석 홀드/Saga/분산락 흐름을 한 번 정리하고 넘어가기로 함. 결제 웹훅 흐름은 decisions.md/api-design.md에 이미 구체적으로 정리돼 있어 새로 공부할 게 적고, 낯선 건 Kafka exactly-once·인프라 서비스들·Gatling/카오스 테스트 방법론 쪽이라 이 부분 위주로 훑을 것.
-3. 그 다음 **3주차**: Kafka exactly-once → 결제 연동(예약 취소 API 포함) → Nginx + 인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포 → 카오스 테스트 + **부하테스트 착수(Gatling으로 분산락 최종 채택 포함)**.
+3. **3주차**: ~~Kafka exactly-once → 결제 연동(예약 취소 API 포함)~~ — **2026-08-27 완료**(아래 해당 날짜 항목 참고). 다음은 Nginx → **카오스 테스트 + 부하테스트(Gatling, 분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch는 미도입으로 확정). decisions.md 13번 원래 순서(카오스/부하테스트가 배포보다 먼저)를 따른다 — 로컬에서 정합성/성능을 먼저 검증한 뒤 배포해야지, 검증 안 된 걸 올려서 그때 테스트하는 건 순서가 거꾸로다(2026-08-27 정정).
 4. ~~프론트엔드(데모용) 병행 착수~~ — **2026-08-23에 3주차 일정보다 앞당겨 완료**(아래 해당 날짜 항목 참고). 원래 계획(결제 연동 끝난 뒤 끼워 넣기)이 아니라 보고서 작성 도중 사용자가 오늘 바로 진행하기로 결정함(사용자 확인 완료) — 총 작업량은 언제 하든 동일하고, 오히려 3주차 중간에 짬을 내야 하는 부담이 없어져 3주차 일정이 더 여유로워짐.
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
@@ -105,7 +105,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 |---|---|---|
 | 1주차 | 08-10 ~ 08-16 | 인증/인가 기반 구축(회원가입/로그인/JWT, Refresh Token은 httpOnly Cookie + Redis 저장) → **ADMIN 승인 API(ORGANIZER 가입 승인)** → **이벤트/구역/좌석 등록 API** → 대기열(순번 관리) 구현 → **포트원 테스트 계정/웹훅 수신 스모크테스트**(사업자등록 불필요, 3주차 결제 연동 시점에 막히지 않도록 선행 확인). **전체 완료.** PG는 토스페이먼츠(카드)+카카오페이(간편결제) 2채널로 확정. |
 | 2주차 | 08-17 ~ 08-23 | 좌석 상태 모델(단일 좌석 흐름), 홀드 TTL/만료 처리, Saga 상태머신, 분산락 벤치마크(Redisson RLock/DB 비관적 락 **두 방식 구현** — 어느 쪽을 채택할지 **확정**은 3주차 부하테스트로 이월) |
-| 3주차 | 08-24 ~ 08-30 | Kafka exactly-once, 결제 연동(**예약 취소 API 포함**), Nginx 설정 + **인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포**(decisions.md 10번, 4주차에서 앞당김) → **후반부에 카오스 테스트 + 부하테스트 착수(분산락 최종 채택 포함)**. **프론트엔드(React/Vite, 데모용 골든 패스만) 병행 — 결제 연동 완료 후, 프론트가 불필요한 구간(인프라/카오스·부하테스트)에 끼워 넣는다.** |
+| 3주차 | 08-24 ~ 08-30 | Kafka exactly-once, 결제 연동(**예약 취소 API 포함**), Nginx 설정 → **카오스 테스트 + 부하테스트(분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch 미도입 확정, 2026-08-27). **프론트엔드는 2026-08-23에 이미 완료.** |
 | 4주차 | 08-31 ~ 09-09 | 카오스 테스트·부하테스트 마무리, 결과 기반 간단한 리팩토링만. 새 기능/인프라 변경 없음 |
 
 **2026-08-16 (1주차 마지막 날) 점검에서 발견/확정된 사항**: decisions.md 13번 구현순서와 주차 일정을 대조한 결과, "이벤트/구역/좌석 등록 API"와 "ADMIN 승인 API"가 설계(api-design.md 2·6번)는 되어 있었지만 구현순서/주차 일정 어디에도 명시적으로 안 들어가 있던 걸 발견 — ADMIN 승인이 없으면 ORGANIZER가 로그인을 못해 이벤트 등록 자체가 막히고, 이벤트/좌석 데이터가 없으면 2주차 좌석 상태 모델 작업을 검증할 수 없어 순서상 1주차(인증/인가 다음)에 추가함(사용자 확인 완료). 예약 취소 API는 별도 항목 없이 3주차 결제 연동에 포함(Saga 보상 로직 재사용). 이 참에 미확정이었던 **Refresh Token 저장 방식도 확정**: httpOnly Cookie로 전달 + Redis(`refresh_token:{accountId}`)에 저장해 로그아웃/재로그인 시 무효화, 다중 기기 로그인은 미지원(계정당 1개 세션). decisions.md 3번, redis-design.md 9번, db-schema.md, api-design.md 전부 반영 완료.
@@ -124,6 +124,16 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 - **범위**: 회원가입/로그인 → 이벤트 목록/상세 → 대기열 진입/순번 폴링(자동 통과 시 좌석 화면으로 이동) → 좌석 선택·홀드(지정석 그리드/스탠딩 수량 모두 지원) → 결제 요청까지. **결제 확정(`PAYMENT_CONFIRMED`)은 포함하지 않는다** — 백엔드에 `POST /api/v1/reservations`(결제 요청)까지만 구현돼 있고 실제 PG 웹훅 연동은 3주차라, 결제 요청 완료 화면에서 "3주차에 이어붙일 예정"이라는 안내만 보여주고 끝난다. 관리자 화면 등은 원래 계획대로 범위 밖.
 - **검증**: `npx tsc -b`/`oxlint` 통과. Docker Compose(MySQL/Redis/Kafka) + 백엔드(`gradlew.bat bootRun`) + 프론트(`npm run dev`)를 모두 띄운 뒤, curl로 프론트가 실제로 보내는 것과 동일한 요청(회원가입·로그인·이벤트 조회·대기열 진입/폴링·좌석 조회/홀드·결제 요청)을 백엔드에 직접 쏴서 계약이 맞는지 확인했고, `Origin: http://localhost:5173` 헤더를 붙여 CORS+쿠키 흐름(로그인 시 `Set-Cookie`, `/auth/refresh`가 그 쿠키를 정상적으로 읽는지)까지 확인했다. 이후 **사용자가 직접 브라우저(`localhost:5173`)에서 새 계정으로 회원가입부터 결제 요청까지 전체 흐름을 클릭해 최종 확인**(예약 번호 27, `PAYMENT_REQUESTED`) — Claude in Chrome 확장을 설치하지 않아 자동화된 브라우저 조작은 이번엔 진행하지 않았다.
 
+- **2026-08-27**: **인프라 최종 확정 + 순서 정정.** 인프라는 EKS/ElastiCache/MSK/CloudWatch를 전부 도입하지 않기로 확정(decisions.md 10번) — "관리형 서비스를 써봤다"는 신입 채용에서 변별력이 낮고, 이 프로젝트의 진짜 강한 소재는 분산락 두 방식을 직접 실측 비교한 것(decisions.md 2번)이라 그쪽에 시간을 쓰기로 함(사용자 확인 완료). AWS는 EC2 + Docker Compose(로컬과 동일 구성) + RDS(MySQL)만 그대로 쓴다. 또한 3주차 일정 순서를 decisions.md 13번 원안대로 정정 — **카오스 테스트·부하테스트가 AWS 배포보다 먼저**다(로컬에서 정합성/성능을 검증한 뒤 배포해야지 그 반대는 순서가 거꾸로임, 이전에 progress.md 표가 잘못 뒤집혀 있었음). 카오스/부하테스트는 로컬 Docker Compose 대상으로 진행한다.
+
+- **2026-08-27**: **Kafka exactly-once + 결제 연동 완료 (3주차 첫 번째·두 번째 항목).** 만든 것: `OutboxEvent` 엔티티/리포지토리(db-schema.md 7번), `ReservationService.markPaymentFailed`가 같은 트랜잭션에서 outbox INSERT, `PaymentFailedConsumer`(Kafka `@KafkaListener`, `ticketrush.reservation.events` 토픽 소비 → `releaseAfterFailure` 호출), `PaymentWebhookService`/`PaymentWebhookController`(`POST /api/v1/payments/webhook`, Standard Webhooks 서명 검증), `GET /reservations/me`·`GET /reservations/{id}`·`POST /reservations/{id}/cancel`, `scripts/register-outbox-connector.ps1`(Debezium Outbox Event Router SMT 커넥터 등록 자동화).
+  - **Kafka Consumer 범위(사용자 확인 완료)**: outbox 이벤트는 `PAYMENT_FAILED` 전이에서만 기록하고, `PAYMENT_CONFIRMED`(정산/알림용) 쪽은 그 기능 자체가 여전히 보류 중이라 안 만든다 — decisions.md 6번에 반영. 결제 실패 시 좌석 반납을 Kafka Consumer가 트리거하게 만든 게, 애초에 `markPaymentFailed`/`releaseAfterFailure`를 2주차에 두 메서드로 나눠뒀던 이유 그 자체다.
+  - **PortOne 웹훅 서명 검증은 구현 당시엔 실서명으로 확인한 적이 없었다** — Standard Webhooks 스펙(webhook-id/webhook-timestamp/webhook-signature + HMAC-SHA256)이라고 가정하고 구현했고(1주차 스모크테스트 로그의 헤더 이름 근거), `.env`에 로컬 테스트용 임시 시크릿을 넣어 자체 서명 생성/검증 왕복으로만 확인했었다. **→ 2026-08-27 같은 날 사용자가 포트원 콘솔에서 실제 웹훅 시크릿을 찾아 `.env`에 반영함(`PORTONE_WEBHOOK_SECRET=whsec_...`).** 다만 이것도 "설정값을 넣었다"이지 "실제 웹훅으로 검증했다"는 아직 아니다 — 포트원 콘솔의 "호출 테스트"는 서명 헤더 없이 오므로(1주차에 이미 확인) 그걸로는 검증이 안 되고, 실제 결제 이벤트가 와야 Standard Webhooks 가정이 맞는지 최종 확인된다. 이 재검증은 프론트 PG SDK 연동(아래 참고) 이후로 자연히 넘어간다.
+  - **`pg_payment_id`의 실제 의미를 바로잡음**: db-schema.md에 "포트원이 발급"이라고 잘못 적혀 있던 걸, 실제로는 merchant(우리 서버)가 결제 요청 시점에 만들어 부여하는 값(`"TICKETRUSH-{reservationId}"`)이라는 걸로 정정(decisions.md 5번, db-schema.md 5번 반영). 프론트가 포트원 SDK 호출 시 이 값을 그대로 넘겨야 하는데, **프론트의 실제 PG SDK 연동(결제창 호출)은 이번 범위에 포함하지 않았다** — 골든 패스 데모는 여전히 결제 요청 화면에서 끝나고, 결제 확정까지 브라우저로 이어지는 건 다음 단계.
+  - **디버깅 중 실제로 겪은 함정 2건(portfolio.md 소재 5로 정리)**: (1) Debezium이 스키마 변경 이벤트를 `topic.prefix`와 같은 이름의 토픽에 발행하려다 브로커의 `auto.create.topics.enable=false` 때문에 무한 재시도에 빠져 커넥터가 `RUNNING` 상태를 유지한 채로 아무것도 발행 못 하고 있었음 — `include.schema.changes=false` + 브로커 옵션 `true`로 해결. (2) Spring Boot 4부터 `spring-kafka` 라이브러리만 추가하면 `KafkaAutoConfiguration`이 전혀 안 붙는다(패키지가 `org.springframework.boot.kafka.autoconfigure`로 분리되어 `spring-boot-starter-kafka`가 별도로 필요, Boot 3까지의 관행과 다름) — 앱이 에러 없이 멀쩡히 기동됐는데도 Kafka 컨슈머 그룹 자체가 생성되지 않는 조용한 실패였다. `build.gradle` 의존성을 스타터로 교체해 해결.
+  - **검증**: Node.js e2e 스크립트로 전체 흐름 확인 — 회원가입/승인/이벤트 등록 → 대기열 통과 → 좌석 홀드 → 결제 요청(`pgPaymentId` 발급 확인) → 웹훅 서명 위조 거절(401) → `Transaction.Paid` 웹훅 → `PAYMENT_CONFIRMED` → 별도 계정으로 두 번째 좌석 홀드/결제 요청 → `Transaction.Failed` 웹훅 → outbox INSERT → Debezium → Kafka → `PaymentFailedConsumer` → `SEAT_RELEASED`까지 자동 전이(좌석도 `AVAILABLE`로 복귀) → 확정 예약 취소(`PAYMENT_CONFIRMED → SEAT_RELEASED`, 좌석 복귀) → 재취소 거절(409) → `GET /reservations/me` 확인, 전 과정 통과. `docker exec ... kafka-consumer-groups --describe`로 컨슈머 그룹 LAG 0까지 직접 확인. `gradlew.bat test` 전체 통과(Kafka 컨슈머 빈이 있어도 테스트 컨텍스트 기동에 지장 없음 확인).
+  - **다음으로 미룬 것**: 프론트 PG SDK 연동(결제창 호출), 웹훅 시크릿 실서명 재검증, Nginx 설정, 카오스/부하테스트(로컬), 그 다음 AWS 배포.
+
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
 ### 구현 단계에서 확정 (db-schema.md / redis-design.md 작성 중 새로 식별된 항목)
@@ -131,15 +141,18 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 - **결제 처리 타임아웃 수치**: PG 웹훅이 안 올 때 "타임아웃"으로 간주하는 대기 시간(홀드 TTL과는 별개 값). `hold` 키 TTL을 이 값으로 재설정해 감지한다(redis-design.md 4번) — 정합성 일관성 체크 중 새로 발견한 항목: 기존 설계(`PERSIST`)로는 PG가 웹훅을 끝내 안 보내는 타임아웃을 아무도 감지하지 못하는 구멍이 있어서 TTL 재설정 방식으로 수정함
 - 홀드 TTL과 결제 처리 시간의 경합 처리: 결제 요청이 TTL 만료 시각 직전에 들어오는 경우의 원자성 보장 방식 (redis-design.md 4번 "미정 사항" 참고, Lua 스크립트로 "TTL 확인 + 재설정"을 원자적으로 묶는 방식 검토 예정)
 - 스탠딩 예약의 `quantity`가 여러 장일 때 개별 티켓 단위 이력이 필요한지 (지금은 한 예약 행 = N장으로 묶음, db-schema.md 참고)
+- **`PORTONE_WEBHOOK_SECRET` 발급 완료(2026-08-27)** — `.env`에 반영됨. 다만 **실제 결제 이벤트로 서명이 맞는지는 아직 확인 전**이다(콘솔 "호출 테스트"는 서명 헤더가 안 옴) — 프론트 PG SDK 연동 이후 실결제/실웹훅으로 재확인할 것.
+- **프론트 PG SDK 연동(포트원 결제창 호출) 미착수**: 백엔드는 `pgPaymentId`를 발급하고 웹훅을 받을 준비가 됐지만, 프론트가 실제로 포트원 SDK(`requestPayment` 등)를 호출해 카드/카카오페이 결제창을 띄우는 부분은 아직 없다 — 지금 데모 프론트는 여전히 "결제 요청 완료" 화면에서 끝난다. 착수 시점 미정(3주차 후반 여유 있을 때 또는 남겨두고 보고서에 한계로 명시하는 방안 모두 가능, 사용자와 논의 필요).
 
 ### 시점이 정해진 결정 (해당 주차 되면 확정)
 
 - **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 두 구현은 2026-08-20에 완료(`GroupHoldLockStrategy`), 실제 채택은 **3주차 부하테스트**에서 Gatling 실측 후 이미 정해진 채택 기준(정합성 우선 → 처리량 차이 20%p 이상이면 우세한 쪽, 미만이면 DB 락)에 따라 확정
-- **인프라 도입 여부**(decisions.md 10번): EKS, ElastiCache, MSK, CloudWatch — 3주차 배포 시점에 확정
-- **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 위 인프라 도입 여부가 3주차에 확정된 뒤 추가
+- **대기열 이탈률 섞은 부하테스트 시나리오**(decisions.md 4번, 2026-08-27 확인): 대기열 이탈자가 있어도 뒤쪽 순번이 밀리지는 않는 것은 코드로 확인됨(`EntryTokenScheduler`가 고정 인원만큼 무조건 빼고 대기열에서 제거). 다만 `queue.admit-count`가 이탈률을 고려하지 않은 고정값이라, 이탈률이 높으면 실사용자 입장 처리가 희석돼 체감 대기시간이 늘어날 수 있음 — 3주차 Gatling 부하테스트에 이탈률을 섞은 시나리오를 추가해 실측 예정
+- **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 인프라 도입 여부는 2026-08-27에 확정(decisions.md 10번, EKS/ElastiCache/MSK/CloudWatch 미도입)됐으니 실제 배포 단계에서 표를 채운다
 
 ### 여유 있을 때 아무 때나 결정 가능 (일정과 무관, decisions.md 11번에서 정리된 항목)
 
 - 성능/처리량 목표치: Gatling 부하테스트 성공 기준(동시접속 N명, P99 응답시간 Xms 등) 미정
 - Outbox 테이블 정리 정책: TTL/배치삭제 정책 — 운영 단계 진입 전 결정 필요
 - **이벤트별 구매 한도(1인 1매/2매) 조직자 설정 기능 — 보류하기로 확정(사용자 확인 완료, 2026-08-19)**: 기술적으로는 단순한 추가(이벤트에 `maxTicketsPerAccount` 컬럼 하나, 좌석 홀드 검증 시 하드코딩된 2매 대신 이 값을 읽도록 변경 — 락/Redis 설계와는 무관)이지만, 이 프로젝트의 핵심(동시성 제어·오버셀 방지·부하/장애 테스트)과 무관한 일반 CRUD성 기능이라 `portfolio.md` 수록 기준에도 안 맞고, 지금은 2주차 분산락 벤치마크가 더 급함. 굳이 넣는다면 3주차 후반(결제 연동 끝나고 카오스/부하테스트 직전)이 그나마 안전한 시점 — 4주차(새 기능 금지 원칙)엔 절대 넣지 않는다.
+- **알려진 프론트엔드 버그: 좌석 홀드 실패(`SEAT_ALREADY_HELD`) 후 좌석 배치도가 자동 갱신 안 됨(2026-08-27, 중간 보고서 리뷰 중 발견)**: `SeatHoldPage.tsx`의 `handleHold` catch 블록은 에러 메시지만 `setError`로 띄우고 `seats` 상태를 다시 안 불러온다. `seats`는 `selectSection` 호출 시점에만 갱신되므로, 방금 다른 사용자가 잡아간 좌석이 화면엔 계속 "선택 가능"으로 보여 같은 좌석을 또 클릭해 같은 에러가 반복될 수 있다. 진짜 최신 상태를 보려면 사용자가 구역을 다시 선택해야 한다(수동 새로고침 우회 경로는 있음 — 완전히 막힌 건 아님). 골든 패스(성공 흐름)만 만들기로 한 프론트 범위 결정(2026-08-23) 때문에 실패 흐름은 처음부터 논의된 적이 없었던 것— 의도적으로 미룬 게 아니라 빠뜨린 것. **고치는 법(예정)**: `handleHold`의 catch에서 `SEAT_ALREADY_HELD`일 때 `section`이 SEATED면 `selectSection(section)`을 재호출해 좌석 목록을 갱신. 지금은 문서화만 하고 나중에 여유 있을 때 수정하기로 함(사용자 확인 완료).

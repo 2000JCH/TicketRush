@@ -4,7 +4,7 @@
 
 Base URL은 `/api/v1`로 통일한다. 인증이 필요한 요청은 `Authorization: Bearer {accessToken}` 헤더로 JWT를 전달한다. 좌석 조회/선택/홀드와 결제 요청 API는 추가로 `X-Entry-Token` 헤더로 입장 토큰을 전달해야 한다 — 대기열을 통과한 사용자만 이 구간에 접근할 수 있도록 하기 위해서다(decisions.md 4번). 단, PG 웹훅은 이 토큰 검증 대상이 아니다(PG가 서버-to-서버로 호출하는 별도 채널이라 브라우저가 들고 있는 토큰과 무관해야 함). 모든 응답은 JSON이다.
 
-Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions.md 3번, 사용자 확인 완료) — 응답 헤더의 `Set-Cookie`로 내려주며 JSON 바디에는 포함하지 않는다. 구현상 쿠키 이름은 `refreshToken`, `Path`는 `/api/v1/auth`로 제한해(인증 API 외의 요청에는 실려가지 않게) `SameSite=Lax`로 발급한다. `Secure`는 기본 켜짐이지만 https가 아닌 로컬 개발에서는 환경변수(`REFRESH_COOKIE_SECURE=false`)로 끌 수 있다 — 켜둔 채로는 http에서 쿠키가 오가지 않아 로컬 테스트가 불가능하기 때문이다. 프론트엔드가 다른 오리진에 놓이면 `SameSite=None`+`Secure`로 바꿔야 한다(프론트 스택 미정이라 보류). 서버는 Redis(`refresh_token:{accountId}`, redis-design.md 9번)에 발급값을 저장해 `/auth/refresh` 요청마다 대조 검증하고, 로그아웃/재로그인 시 무효화한다. 계정당 Refresh Token은 1개만 유지되므로(다중 기기 로그인 미지원, 사용자 확인 완료) 다른 기기에서 로그인하면 기존 기기는 이후 재발급이 실패한다.
+Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions.md 3번, 사용자 확인 완료) — 응답 헤더의 `Set-Cookie`로 내려주며 JSON 바디에는 포함하지 않는다. 구현상 쿠키 이름은 `refreshToken`, `Path`는 `/api/v1/auth`로 제한해(인증 API 외의 요청에는 실려가지 않게) `SameSite=Lax`로 발급한다. `Secure`는 기본 켜짐이지만 https가 아닌 로컬 개발에서는 환경변수(`REFRESH_COOKIE_SECURE=false`)로 끌 수 있다 — 켜둔 채로는 http에서 쿠키가 오가지 않아 로컬 테스트가 불가능하기 때문이다. 프론트엔드(React/Vite, `localhost:5173`)는 로컬에서 백엔드와 포트만 다른 오리진이지만 도메인은 같은 `localhost`라 SameSite 기준으로는 같은 사이트에 해당하며, 실제로 `SameSite=Lax`인 채로 CORS(`credentials: include`)를 붙여 로그인/재발급 흐름이 정상 동작하는 것까지 확인했다(2026-08-23). 다만 3주차 AWS 배포 시 프론트엔드와 백엔드가 서로 다른 도메인에 놓이면(진짜 "다른 사이트") 그때는 `SameSite=None`+`Secure`로 바꿔야 한다. 서버는 Redis(`refresh_token:{accountId}`, redis-design.md 9번)에 발급값을 저장해 `/auth/refresh` 요청마다 대조 검증하고, 로그아웃/재로그인 시 무효화한다. 계정당 Refresh Token은 1개만 유지되므로(다중 기기 로그인 미지원, 사용자 확인 완료) 다른 기기에서 로그인하면 기존 기기는 이후 재발급이 실패한다.
 
 ---
 
@@ -193,23 +193,33 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 
 **결제 요청 응답 (즉시 반환 — 동기 구간, architecture.md 2-3 참고)**
 ```json
-{ "reservationId": 501, "status": "PAYMENT_REQUESTED" }
+{ "reservationId": 501, "status": "PAYMENT_REQUESTED", "pgPaymentId": "TICKETRUSH-501" }
 ```
+- `pgPaymentId`(3주차 결제 연동에서 추가): 프론트가 포트원 V2 결제창 SDK를 호출할 때 `paymentId`로 그대로 넘겨야 하는 값. 서버가 `"TICKETRUSH-{reservationId}"` 형식으로 생성한다(db-schema.md `reservation.pg_payment_id` 참고).
 
-**예약 상세 조회 응답 (결제 결과는 클라이언트가 이 엔드포인트를 폴링해서 확인)**
+**예약 상세 조회 응답 (결제 결과는 클라이언트가 이 엔드포인트를 폴링해서 확인, `GET /reservations/{id}`와 `GET /reservations/me`가 공용)**
 ```json
 {
   "reservationId": 501,
+  "eventId": 1,
   "status": "PAYMENT_CONFIRMED",
+  "quantity": 2,
   "amount": 300000,
+  "requestedAt": "2026-09-01T20:01:03",
   "confirmedAt": "2026-09-01T20:03:12"
 }
 ```
-- `status`는 db-schema.md `reservation.status`와 동일한 값(`PAYMENT_REQUESTED`/`PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED`)이다. `reservationId`는 결제 요청(`POST /api/v1/reservations`) 응답에서 처음 발급된다 — 좌석만 찜한 `SEAT_HELD` 단계는 DB 행이 아직 없어(db-schema.md 설계 원칙 참고) 조회할 `reservationId` 자체가 존재하지 않는다.
+- `status`는 db-schema.md `reservation.status`와 동일한 값(`PAYMENT_REQUESTED`/`PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED`)이다. `reservationId`는 결제 요청(`POST /api/v1/reservations`) 응답에서 처음 발급된다 — 좌석만 찜한 `SEAT_HELD` 단계는 DB 행이 아직 없어(db-schema.md 설계 원칙 참고) 조회할 `reservationId` 자체가 존재하지 않는다. `GET /reservations/me`는 이 형태의 배열을 반환한다(구현 단계에서 확정 — 원래 예시엔 `eventId`/`quantity`/`requestedAt`이 없었으나, 목록에서 "어느 이벤트의 몇 매짜리 예약인지" 구분하려면 필요해 추가함).
 
-**2주차 "Saga 상태머신" 단계의 구현 범위(사용자 확인 완료)**: `POST /api/v1/reservations`만 이번에 구현했다 — `PAYMENT_REQUESTED` 행(과 지정석이면 `reservation_seat`)을 만들고 `hold_schedule`을 결제 처리 타임아웃으로 재조정(redis-design.md 4-1번)하는 것까지만 하고, **실제 PG(포트원) 호출은 하지 않는다**. `POST /api/v1/payments/webhook`, `GET /reservations/me`, `GET /reservations/{id}`, 취소 API는 아직 만들지 않았다 — 실제 웹훅 서명 검증이 없는 상태에서 확정/실패 상태 전이(Saga 보상 포함)를 테스트할 방법이 마땅치 않아, 이번엔 `ReservationService.confirmPayment`/`markPaymentFailed`/`releaseAfterFailure`를 직접 호출하는 자동 테스트(`ReservationServiceTest`, 이 프로젝트 첫 JUnit 자동 테스트)로만 검증했다. 실제 웹훅 컨트롤러가 이 메서드들을 호출하도록 이어붙이는 것과 조회/취소 API는 3주차 "결제 연동"에서 구현한다.
+**예약 취소 응답**: 위와 동일한 상세 조회 형식을 그대로 반환한다(`status: "SEAT_RELEASED"`). `PAYMENT_CONFIRMED` 상태에서만 취소할 수 있고, 그 외 상태에서 시도하면 `RESERVATION_NOT_CANCELLABLE`(409)이다.
 
-**`markPaymentFailed`/`releaseAfterFailure`로 두 단계 분리(구현 단계에서 확정)**: decisions.md 5번의 Choreography(Kafka Consumer 기반)에서는 이 둘이 서로 다른 트랜잭션(별도 Consumer 처리)이 될 예정이라, 미리 독립된 메서드로 나눠뒀다 — 3주차엔 Kafka Consumer가 각 메서드를 호출하도록 이어붙이기만 하면 된다.
+**웹훅 요청 (`POST /api/v1/payments/webhook`)**: 포트원 V2가 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙을 쓰는 것으로 확인해(1주차 스모크테스트 로그에 `webhook-signature` 헤더가 그대로 찍힘) 그 방식으로 서명 검증을 구현했다 — `webhook-id`/`webhook-timestamp`/`webhook-signature` 헤더 + HMAC-SHA256(secret은 `whsec_` 접두사 + base64), 타임스탬프 5분 이상 벗어나면 서명이 맞아도 거절(재전송 공격 방지). **다만 실제 시크릿을 콘솔에서 아직 못 찾아 이 가정을 실서명으로 검증한 적은 없다** — 발급받으면 재확인 필요(progress.md 추적). 시크릿이 비어있으면(`.env`에 `PORTONE_WEBHOOK_SECRET` 없음) 모든 웹훅을 거절한다(빈 시크릿으로 통과시키는 게 인증을 끈 것보다 더 위험하기 때문).
+- 처리하는 `type`: `Transaction.Paid` → `confirmPayment`(→ `PAYMENT_CONFIRMED`), `Transaction.Failed` → `markPaymentFailed`(→ `PAYMENT_FAILED`, 이후 Kafka Consumer가 `releaseAfterFailure`를 트리거해 좌석을 반납한다, 아래 "Kafka exactly-once 연동" 참고). 그 외 `type`(`Transaction.Ready`/`Transaction.Cancelled` 등)은 로그만 남기고 무시한다.
+- 웹훅 body의 `data.paymentId`로 `reservation.pg_payment_id`를 역조회해 어느 예약인지 찾는다. **단순화(알려진 한계)**: 웹훅 body의 값을 그대로 신뢰한다 — 더 엄격하게 하려면 포트원 결제 조회 API(GetPayment)로 서버 대 서버 재검증을 해야 하지만, 실제 결제 채널(카드/카카오페이) 프론트 연동이 아직 없어 검증할 방법이 없어 미룬다.
+
+**Kafka exactly-once 연동(3주차, decisions.md 6번)**: `markPaymentFailed`가 같은 트랜잭션에서 `outbox_events`(`event_type=PAYMENT_FAILED`)에도 INSERT하고, Debezium(Outbox Event Router SMT)이 이를 감지해 Kafka 토픽 `ticketrush.reservation.events`로 발행한다. Spring Kafka `@KafkaListener`(`PaymentFailedConsumer`)가 이를 소비해 `releaseAfterFailure`(좌석 반납)를 호출한다 — decisions.md 5번 Choreography(중앙 조율자 없이 Kafka Consumer로 다음 단계를 잇는 방식)를 그대로 구현한 것이며, `markPaymentFailed`/`releaseAfterFailure`를 애초에 두 메서드로 나눠뒀던 이유가 바로 이것이다. `PAYMENT_CONFIRMED` 쪽은 정산/알림 기능 자체가 보류 중이라(아래 "남은 항목" 참고) outbox 이벤트를 만들지 않는다.
+- Kafka/Debezium은 at-least-once 전달만 보장하지만, `releaseAfterFailure`가 이미 상태 체크(`status == PAYMENT_FAILED`)로 멱등하므로 재전달돼도 안전하다 — "at-least-once + 멱등 소비자"로 exactly-once 효과를 얻는다. decisions.md 6번이 말하는 진짜 Kafka 트랜잭션 API(consume-transform-**produce**)는 이 컨슈머처럼 재발행 단계가 없는 흐름에는 쓰지 않는다.
+- **로컬 개발 환경 주의**: Kafka Connect(Debezium)가 outbox_events의 스키마 변경 이벤트를 `topic.prefix`와 같은 이름의 토픽("ticketrush")에 발행하려다, 브로커의 `auto.create.topics.enable=false` 설정 때문에 그 토픽이 없어 무한 재시도에 빠지는 문제를 실제로 겪었다(2026-08-27) — 커넥터 설정에 `include.schema.changes=false`를 추가하고, `docker-compose.yml`의 `KAFKA_AUTO_CREATE_TOPICS_ENABLE`을 `true`로 바꿔 해결했다(progress.md에 상세 기록).
 
 ---
 
@@ -269,6 +279,8 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 | EVENT_ALREADY_OPENED | 409 | 이미 예매가 시작된 이벤트의 수정/삭제 시도 (구현 단계에서 추가) |
 | SEAT_NOT_FOUND | 404 | 좌석 없음 |
 | RESERVATION_NOT_FOUND | 404 | 예약 없음 (또는 아직 `SEAT_HELD` 단계라 DB 행 없음) |
+| RESERVATION_NOT_CANCELLABLE | 409 | `PAYMENT_CONFIRMED`가 아닌 예약을 취소 시도 (구현 단계에서 추가) |
+| INVALID_WEBHOOK_SIGNATURE | 401 | PG 웹훅 서명 검증 실패, 헤더 누락, 타임스탬프 만료, 시크릿 미발급 (구현 단계에서 추가) |
 | EMAIL_ALREADY_EXISTS | 409 | 이미 가입된 이메일로 회원가입 시도 (구현 단계에서 추가) |
 | SEAT_ALREADY_HELD | 409 | 이미 다른 사용자가 선택 중인 좌석 |
 | STANDING_SOLD_OUT | 409 | 스탠딩 매진 |

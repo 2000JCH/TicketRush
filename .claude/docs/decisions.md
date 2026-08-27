@@ -64,6 +64,7 @@
 - **입장 토큰 검증 범위는 좌석 조회/선택/홀드 API에만 적용되고, 결제 확정 웹훅에는 적용되지 않는다.** 웹훅은 PG가 서버-to-서버로 호출하는 별도 채널이라 사용자 브라우저가 들고 있는 토큰과 무관해야 하며, 그 멱등성은 5번의 DB 상태 확인으로 별도 보장한다. (결제 승인 직전에 토큰이 만료돼서 정상 결제가 실패하는 상황을 방지하기 위한 명시.)
 - Nginx Rate Limiting과는 역할이 다름 → Rate Limiting은 초과 요청을 순서 무관하게 거절하는 것이고, 대기열은 "먼저 온 사람이 먼저 산다"는 공정성을 보장하는 것. Nginx는 대기열 진입 API 앞단의 1차 방어로만 사용.
 - 대기열 이탈(사용자가 탭을 닫거나 이탈하는 경우) 처리: 개별 사용자의 실시간 이탈 여부는 추정하지 않는다 — Rush 특성상 대기열이 예상보다 길어지는 것 자체가 정상 시나리오라, 시간 기준으로 오래 대기 중인 엔트리를 정리하면 실제로 기다리는 사용자를 오판해 쫓아낼 위험이 있다. 대신 매진되거나 이벤트가 종료된 시점에 대기열(`queue:{eventId}`) 전체를 일괄 만료시키는 것으로 단순화한다. 개별 이탈로 순번 계산이 다소 부정확해질 수 있으나 오버셀로 이어지지 않으므로 허용한다.
+  → **구현 확인(2026-08-27)**: `EntryTokenScheduler`는 매 주기 고정 인원 수(`queue.admit-count`)만큼 뽑아 입장 토큰을 발급하고 즉시 대기열에서 제거하므로(`QueueRepository.remove`), 이탈자가 있어도 뒤쪽 순번이 밀리는 정체는 생기지 않는다(오버셀·무한대기 관점에서는 문제없음, 확인 완료). 다만 `admit-count`가 이탈률을 고려하지 않은 고정값이라, 한 배치에 이탈자가 많이 섞이면 그만큼 실사용자 입장 처리가 희석돼 체감 대기시간이 늘어날 수 있다는 점은 지금까지 검토된 적이 없었다 — **3주차 Gatling 부하테스트 시나리오에 이탈률을 섞은 케이스를 추가해 실측하기로 함(사용자 확인 완료)**. progress.md "시점이 정해진 결정" 참고.
 - 봇 탐지/CAPTCHA, 멀티 리전 대기열 동기화는 범위 제외 (단일 Redis 인스턴스 기준)
 
 ## 5. 결제 정합성
@@ -77,12 +78,19 @@
   - 상태: `SEAT_HELD → PAYMENT_REQUESTED → PAYMENT_CONFIRMED` (정상) / `→ PAYMENT_FAILED → SEAT_RELEASED` (보상) / TTL 만료 시에도 동일 Consumer가 처리
 - **예약/결제 테이블 구조: `reservation` 단일 테이블로 확정 (좌석 점유 + 결제 기록을 별도 테이블로 분리하는 안은 채택 안 함).** PG를 포트원 경유로 쓰기로 해 PG사 메타데이터 확장 부담이 적고, 상태 컬럼 하나로 Saga 상태머신을 단순하게 유지하는 쪽이 8번 카오스 테스트 검증에 유리하기 때문. (이후 그룹 홀드 지원을 위해 좌석 정보만 `reservation_seat` 자식 테이블로 별도 분리했지만, 이건 "결제 정보 분리"가 아니라 "한 예약에 좌석이 여러 개 담기는 것"을 표현하기 위한 것이라 이 결정과는 다른 축이다 — db-schema.md 5·6번 참고.)
 - **PG사: 포트원 V2 경유로 토스페이먼츠(카드) + 카카오페이(간편결제) 2개 채널을 동시 지원하기로 확정(사용자 확인 완료, 1주차 웹훅 스모크테스트 진행 중 결정).** V2는 PG사와 무관하게 웹훅 페이로드/서명 검증 방식을 통일하므로, 채널이 2개여도 웹훅 수신·서명 검증·결제 확정 로직은 PG사별 분기 없이 하나로 처리한다. 결제 요청 시 프론트가 `channelKey`로 어느 채널을 쓸지만 선택하면 되고, 이 선택은 백엔드 결제 API에는 영향을 주지 않는다.
+- **웹훅 서명 검증 방식(3주차 결제 연동, 가정 — 실서명 미검증)**: 1주차 스모크테스트 로그에 `webhook-signature` 헤더가 그대로 찍혔던 걸 근거로 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙(`webhook-id`/`webhook-timestamp`/`webhook-signature` + HMAC-SHA256)을 따른다고 가정하고 구현했다. `PORTONE_WEBHOOK_SECRET`을 콘솔에서 아직 못 찾아 실제 서명으로 검증해본 적은 없음 — 발급받으면 재확인 필요(progress.md 추적). 시크릿이 비어있으면 모든 웹훅을 무조건 거절한다(빈 값 통과보다 안전).
+- **웹훅 재검증 단순화(알려진 한계)**: 웹훅 body(`type`/`data.paymentId`)의 값을 그대로 신뢰해 결제 확정/실패를 판단한다. 원칙적으로는 포트원 결제 조회 API(GetPayment)로 서버 대 서버 재검증을 해야 하지만, 실제 결제 채널(카드/카카오페이) 프론트 SDK 연동이 아직 없어 검증할 대상 자체가 없다 — 프론트 PG 연동이 이어지는 시점에 함께 보강한다.
+- **`pg_payment_id`의 실제 의미 정정**: db-schema.md에는 원래 "포트원이 발급하는 값"으로 적혀 있었으나, 실제 PortOne 연동 방식은 반대다 — **merchant(우리 서버)가 결제 요청 시점에 생성해 부여하는 식별자**(`"TICKETRUSH-{reservationId}"`)이고, 프론트가 포트원 SDK 호출 시 이 값을 그대로 넘긴다. 웹훅이 이 값을 담아 돌아오므로 이걸로 예약을 역조회한다(db-schema.md 5번에 반영 완료).
 
 ## 6. DB 쓰기 + Kafka 발행 원자성 (Outbox 패턴)
 
 - DB 쓰기와 Kafka 이벤트 발행은 서로 다른 시스템이라 하나의 트랜잭션으로 묶을 수 없음
-- 해결: 결제확정 시 `reservation` INSERT와 같은 DB 트랜잭션 안에 `outbox_events` 테이블도 함께 INSERT → Debezium이 이 테이블 변경을 감지해 Kafka로 발행
+- 해결: DB 트랜잭션 안에 `outbox_events` 테이블도 함께 INSERT → Debezium이 이 테이블 변경을 감지해 Kafka로 발행
 - Kafka 트랜잭션(exactly-once)은 결제확정 이후의 consume-transform-produce 구간(예: 정산 이벤트 발행)에만 적용 → DB-Kafka 간 원자성 자체를 Kafka 트랜잭션으로 오해하지 않도록 범위를 명확히 구분
+
+**3주차 구현 범위 확정(2026-08-27, 사용자 확인 완료)**: outbox 이벤트는 **`PAYMENT_FAILED` 전이에서만** 기록한다(위 문단의 "결제확정 시" 표현은 이 확정 이전에 쓴 것이라 정정) — `markPaymentFailed`가 outbox에 `event_type=PAYMENT_FAILED`를 남기면, Kafka Consumer(`PaymentFailedConsumer`)가 이를 받아 보상 2단계(`releaseAfterFailure`, 좌석 반납)를 트리거한다. `PAYMENT_CONFIRMED` 이후의 정산/알림은 여전히 보류 중인 기능이라 outbox 이벤트를 만들지 않는다 — 그 기능이 생기면 같은 `outbox_events` 테이블에 `event_type=PAYMENT_CONFIRMED`로 추가하면 된다. 이 선택은 "정산" 같은 나중 기능의 자리표시자를 만드는 대신, 이 프로젝트 핵심(오버셀 없이 장애를 버티는가)과 직결된 실패 보상 경로에 Kafka exactly-once를 실제로 적용한 것이다.
+- Kafka/Debezium은 at-least-once 전달만 보장하지만 `releaseAfterFailure`가 이미 상태 체크(`status == PAYMENT_FAILED`)로 멱등하므로 재전달돼도 안전하다 — "at-least-once + 멱등 소비자"로 exactly-once **효과**를 얻는다(진짜 Kafka 트랜잭션 API는 재발행 단계가 없는 이 소비자엔 적용하지 않음).
+- **로컬 인프라 조정**: 이 파이프라인을 실제로 연결하는 과정에서 Debezium이 스키마 변경 이벤트를 `topic.prefix`와 같은 이름의 토픽에 발행하려다 `auto.create.topics.enable=false`(기존 설정) 때문에 무한 재시도에 빠지는 문제를 발견 — 커넥터 설정에 `include.schema.changes=false`를 추가하고, `docker-compose.yml`의 `KAFKA_AUTO_CREATE_TOPICS_ENABLE`을 `true`로 바꿔 해결(1인 로컬 개발 규모라 토픽 자동 생성 위험보다 이 문제를 피하는 실익이 큼). 커넥터 등록은 `scripts/register-outbox-connector.ps1`로 자동화했다. 상세 디버깅 과정은 portfolio.md 소재 5 참고.
 
 ## 7. Kafka의 역할 (오해 방지용 메모)
 
@@ -104,10 +112,14 @@
 - 시점별 차등수수료, 부분환불은 구현 범위에서 제외 (설계 문서로만 남김)
   → 새로운 기술 개념 없이 비즈니스 룰과 케이스 수만 늘어나는 영역이라 판단
 
-## 10. 인프라 (미확정 사항 포함)
+**구현 단계에서 정확히 확정(3주차)**: `POST /reservations/{id}/cancel`은 `PAYMENT_CONFIRMED` 상태에서만 허용하고(그 외 `RESERVATION_NOT_CANCELLABLE` 409), 도착 상태는 Saga 보상과 동일하게 `SEAT_RELEASED`를 재사용한다 — 여기까지는 "재사용"이 맞다. 다만 Redis 반납 로직은 `SeatService.compensate`(홀드 중 실패 롤백용, `hold`/`active_reservation`/`hold_schedule` 세 키를 함께 정리)를 그대로 쓰지 않고 **새 메서드 `releaseConfirmed`**를 추가해 썼다 — `PAYMENT_CONFIRMED`가 되는 순간 `confirmHold`가 이미 그 세 키를 전부 정리하고 `seat_status`만 "확정 판매"로 남겨두므로(redis-design.md 3번), 취소 시점엔 `seat_status`만 되돌리면 되고 나머지를 다시 건드리면 오히려 이미 없는 키를 지우는 무의미한 호출이 된다.
 
-- 확정: AWS EC2, Docker Compose, RDS(MySQL)
-- 검토 중: EKS, ElastiCache, MSK, CloudWatch → 4주차 배포 시점에 확정 (운영 부담 vs 비용/학습효과 트레이드오프)
+## 10. 인프라
+
+- **확정: AWS EC2 + Docker Compose + RDS(MySQL). EKS/ElastiCache/MSK/CloudWatch는 도입하지 않는다(2026-08-27, 사용자 확인 완료).**
+  → 신입 채용 포트폴리오 관점에서 "관리형 서비스를 써봤다" 자체는 변별력이 낮고, 오히려 채택 근거를 설명 못 하면 역효과가 난다. 이 프로젝트에서 실제로 강한 소재는 **분산락 두 방식을 직접 구현·실측해 근거를 갖고 선택한 것**(2번)이라, 인프라를 넓게 벌리는 대신 그 비교 결과를 정리하는 데 시간을 쓰기로 함.
+  → Redis와 Kafka(Kafka Connect+Debezium 포함)도 로컬 `docker-compose.yml`과 동일하게 **EC2 위에서 Docker Compose로 그대로 운영**한다 — 별도 관리형 서비스로 옮기지 않음. MySQL만 RDS(관리형)를 쓰는 이유는 이미 원래 계획(1주차 이전)에 있던 결정이라 그대로 유지.
+  → CloudWatch도 이번엔 별도로 구성하지 않는다(로그/모니터링은 범위 밖).
 
 ## 11. 미확정 사항 (추후 결정)
 
