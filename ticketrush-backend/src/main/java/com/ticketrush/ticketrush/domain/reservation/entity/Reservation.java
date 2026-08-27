@@ -63,7 +63,7 @@ public class Reservation extends BaseTimeEntity {
     @Column(name = "idempotency_key", nullable = false, unique = true, length = 64)
     private String idempotencyKey;
 
-    @Column(name = "pg_payment_id", length = 64)
+    @Column(name = "pg_payment_id", unique = true, length = 64)
     private String pgPaymentId;
 
     @Column(name = "requested_at", nullable = false)
@@ -87,6 +87,14 @@ public class Reservation extends BaseTimeEntity {
     public static Reservation request(
             Account account, Event event, Section section, int quantity, int amount, String idempotencyKey) {
         return new Reservation(account, event, section, quantity, amount, idempotencyKey);
+    }
+
+    /**
+     * 포트원 결제 요청 시 프론트가 PortOne SDK에 넘길 merchant 발급 결제 식별자를 부여한다.
+     * 웹훅 수신 시 이 값(payload의 data.paymentId)으로 예약을 역참조한다(PaymentWebhookService).
+     */
+    public void assignPgPaymentId(String pgPaymentId) {
+        this.pgPaymentId = pgPaymentId;
     }
 
     public void confirm() {

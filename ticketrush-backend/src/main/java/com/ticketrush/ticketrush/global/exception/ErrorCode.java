@@ -35,6 +35,8 @@ public enum ErrorCode {
     ACTIVE_HOLD_NOT_FOUND(HttpStatus.NOT_FOUND, "결제를 요청할 좌석 홀드가 없습니다. 다시 선택해주세요."),
     DUPLICATE_PAYMENT_REQUEST(HttpStatus.CONFLICT, "이미 처리 중인 결제 요청입니다."),
     RESERVATION_NOT_FOUND(HttpStatus.NOT_FOUND, "예약을 찾을 수 없습니다."),
+    RESERVATION_NOT_CANCELLABLE(HttpStatus.CONFLICT, "결제 완료된 예약만 취소할 수 있습니다."),
+    INVALID_WEBHOOK_SIGNATURE(HttpStatus.UNAUTHORIZED, "웹훅 서명이 유효하지 않습니다."),
     INVALID_INPUT(HttpStatus.BAD_REQUEST, "요청 입력값이 올바르지 않습니다."),
     INTERNAL_SERVER_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "서버 내부 오류가 발생했습니다.");
 

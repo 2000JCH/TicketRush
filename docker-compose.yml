@@ -53,7 +53,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: false
+      # true로 둔다(2026-08-27) — Debezium Outbox 커넥터(decisions.md 6번)가 aggregate_type 값에
+      # 따라 토픽을 동적으로 만든다(route.topic.replacement). false였을 때 대상 토픽이 없어
+      # 커넥터 태스크가 UNKNOWN_TOPIC_OR_PARTITION 재시도 루프에 빠져 전혀 발행을 못 하는 문제를
+      # 실제로 겪었다 — 로컬 1인 개발 규모라 토픽 난립 위험보다 이 문제를 피하는 게 더 실용적이다.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
       CLUSTER_ID: GQIZo3kUxRLhbn8NBZPs5Q
 
   kafka-connect:

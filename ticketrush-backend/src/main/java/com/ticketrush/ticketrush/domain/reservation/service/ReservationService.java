@@ -10,11 +10,14 @@ import com.ticketrush.ticketrush.domain.event.repository.SeatRepository;
 import com.ticketrush.ticketrush.domain.event.repository.SectionRepository;
 import com.ticketrush.ticketrush.domain.queue.service.QueueService;
 import com.ticketrush.ticketrush.domain.reservation.dto.PaymentRequest;
+import com.ticketrush.ticketrush.domain.reservation.dto.ReservationDetailResponse;
 import com.ticketrush.ticketrush.domain.reservation.dto.ReservationResponse;
+import com.ticketrush.ticketrush.domain.reservation.entity.OutboxEvent;
 import com.ticketrush.ticketrush.domain.reservation.entity.Reservation;
 import com.ticketrush.ticketrush.domain.reservation.entity.ReservationSeat;
 import com.ticketrush.ticketrush.domain.reservation.entity.ReservationStatus;
 import com.ticketrush.ticketrush.domain.reservation.repository.IdempotencyRepository;
+import com.ticketrush.ticketrush.domain.reservation.repository.OutboxEventRepository;
 import com.ticketrush.ticketrush.domain.reservation.repository.ReservationRepository;
 import com.ticketrush.ticketrush.domain.reservation.repository.ReservationSeatRepository;
 import com.ticketrush.ticketrush.domain.seat.service.SeatService;
@@ -29,6 +32,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Saga 상태머신(decisions.md 5번) — `PAYMENT_REQUESTED → PAYMENT_CONFIRMED`(정상) /
@@ -58,8 +62,10 @@ public class ReservationService {
     private final ReservationRepository reservationRepository;
     private final ReservationSeatRepository reservationSeatRepository;
     private final IdempotencyRepository idempotencyRepository;
+    private final OutboxEventRepository outboxEventRepository;
     private final SeatService seatService;
     private final QueueService queueService;
+    private final ObjectMapper objectMapper;
 
     @Value("${seat.hold-ttl-millis}")
     private long holdTtlMillis;
@@ -99,6 +105,9 @@ public class ReservationService {
             // Redis SETNX가 유실된 경우의 2차 방어선 — DB UNIQUE(idempotency_key) 제약(decisions.md 5번).
             throw new BusinessException(ErrorCode.DUPLICATE_PAYMENT_REQUEST);
         }
+        // 프론트가 PortOne SDK 호출 시 넘길 merchant 결제 식별자. 웹훅 수신 시 이 값으로 역참조한다
+        // (PaymentWebhookService). reservation.getId()는 save() 직후(IDENTITY 전략)에만 존재한다.
+        reservation.assignPgPaymentId("TICKETRUSH-" + reservation.getId());
 
         if (activeHold.isSeat()) {
             // db-schema.md 6번 uq_active_seat를 대체하는 애플리케이션 레벨 2차 방어선(사용자 확인 완료).
@@ -139,7 +148,13 @@ public class ReservationService {
                 reservation.getSection().getId(), seatIds, reservation.getQuantity());
     }
 
-    /** 보상 1단계: PAYMENT_REQUESTED → PAYMENT_FAILED. */
+    /**
+     * 보상 1단계: PAYMENT_REQUESTED → PAYMENT_FAILED. 같은 트랜잭션 안에서 outbox_events에도
+     * 이벤트를 남긴다(decisions.md 6번 Outbox 패턴) — Debezium이 이 INSERT를 감지해 Kafka로
+     * 발행하면, 별도 Consumer가 이를 받아 보상 2단계({@link #releaseAfterFailure})를 트리거한다.
+     * decisions.md 5번의 Choreography(중앙 조율자 없이 Kafka Consumer로 다음 단계를 잇는 방식)를
+     * 그대로 구현한 것 — 실패 감지와 좌석 반납이 서로 다른 트랜잭션으로 분리된다.
+     */
     @Transactional
     public void markPaymentFailed(Long reservationId) {
         Reservation reservation = reservationRepository.findById(reservationId)
@@ -148,6 +163,12 @@ public class ReservationService {
             return;
         }
         reservation.fail();
+
+        String payload = objectMapper.writeValueAsString(new PaymentFailedPayload(reservationId));
+        outboxEventRepository.save(OutboxEvent.paymentFailed(reservationId, payload));
+    }
+
+    private record PaymentFailedPayload(Long reservationId) {
     }
 
     /** 보상 2단계: 좌석/스탠딩 반납 + PAYMENT_FAILED → SEAT_RELEASED. */
@@ -167,6 +188,54 @@ public class ReservationService {
                 reservation.getSection().getId(), seatIds, reservation.getQuantity());
 
         reservation.release();
+    }
+
+    @Transactional(readOnly = true)
+    public List<ReservationDetailResponse> findMyReservations(Long accountId) {
+        return reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId).stream()
+                .map(ReservationDetailResponse::of)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public ReservationDetailResponse findDetail(Long accountId, Long reservationId) {
+        Reservation reservation = findOwnedReservation(accountId, reservationId);
+        return ReservationDetailResponse.of(reservation);
+    }
+
+    /**
+     * 예약 취소(decisions.md 9번, MVP: 전액 취소만). PAYMENT_CONFIRMED 상태에서만 가능하다 —
+     * 진행 중인 결제 요청은 웹훅/TTL이 알아서 정리하고, 이미 끝난 예약은 취소할 대상이 없다.
+     * 도착 상태는 Saga 보상(releaseAfterFailure)과 동일한 SEAT_RELEASED를 재사용하지만
+     * ({@code compensate}가 아니라) {@link com.ticketrush.ticketrush.domain.seat.service.SeatService#releaseConfirmed}로
+     * 반납한다 — 이미 confirmHold에서 hold/active_reservation 흔적이 정리된 "판매 완료" 좌석이기
+     * 때문이다.
+     */
+    @Transactional
+    public ReservationDetailResponse cancel(Long accountId, Long reservationId) {
+        Reservation reservation = findOwnedReservation(accountId, reservationId);
+        if (reservation.getStatus() != ReservationStatus.PAYMENT_CONFIRMED) {
+            throw new BusinessException(ErrorCode.RESERVATION_NOT_CANCELLABLE);
+        }
+
+        List<ReservationSeat> seats = reservationSeatRepository.findAllByReservationId(reservationId);
+        seats.forEach(ReservationSeat::release);
+        List<Long> seatIds = seats.stream().map(rs -> rs.getSeat().getId()).toList();
+
+        seatService.releaseConfirmed(
+                reservation.getEvent().getId(), reservation.getSection().getId(), seatIds, reservation.getQuantity());
+        reservation.release();
+
+        return ReservationDetailResponse.of(reservation);
+    }
+
+    private Reservation findOwnedReservation(Long accountId, Long reservationId) {
+        Reservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.RESERVATION_NOT_FOUND));
+        if (!reservation.getAccount().getId().equals(accountId)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return reservation;
     }
 
     /** 결제 요청 body가 실제로 들고 있는 홀드와 일치하는지 확인 — 남의 홀드나 옛 홀드로 결제를 시도하지 못하게 막는다. */

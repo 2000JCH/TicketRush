@@ -24,6 +24,12 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-security'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	// Kafka exactly-once(decisions.md 6번) — outbox_events를 Debezium이 발행한 토픽을 소비한다.
+	// Spring Boot 4부터는 spring-kafka만 추가하면 KafkaAutoConfiguration이 전혀 안 붙는다(패키지가
+	// org.springframework.boot.kafka.autoconfigure로 분리됨) — 반드시 이 스타터를 써야 한다.
+	// 실제로 spring-kafka만 넣었다가 @KafkaListener가 전혀 등록되지 않는 걸 겪고 알아낸 것
+	// (2026-08-27, spring-boot #48880/spring-kafka #4278).
+	implementation 'org.springframework.boot:spring-boot-starter-kafka'
 	implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
 	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
 	// jjwt의 JSON 직렬화기. jjwt-jackson은 Jackson 2를 요구하는데 Spring Boot 4는 Jackson 3을 쓰므로 gson을 쓴다.
@@ -40,6 +46,7 @@ dependencies {
 	testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.springframework.kafka:spring-kafka-test'
 	testCompileOnly 'org.projectlombok:lombok'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 	testAnnotationProcessor 'org.projectlombok:lombok'

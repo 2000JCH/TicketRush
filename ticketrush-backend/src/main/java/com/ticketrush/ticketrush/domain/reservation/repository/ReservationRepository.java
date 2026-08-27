@@ -2,11 +2,17 @@ package com.ticketrush.ticketrush.domain.reservation.repository;
 
 import com.ticketrush.ticketrush.domain.reservation.entity.Reservation;
 import com.ticketrush.ticketrush.domain.reservation.entity.ReservationStatus;
+import java.util.List;
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface ReservationRepository extends JpaRepository<Reservation, Long> {
+
+    Optional<Reservation> findByPgPaymentId(String pgPaymentId);
+
+    List<Reservation> findAllByAccountIdOrderByRequestedAtDesc(Long accountId);
 
     /**
      * 계정당 이벤트별 누적 확정 매수 (decisions.md 1번 사재기 방지 3번째 규칙, db-schema.md

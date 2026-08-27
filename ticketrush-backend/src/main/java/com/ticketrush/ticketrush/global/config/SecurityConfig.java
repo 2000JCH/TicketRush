@@ -78,6 +78,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST,
                                 "/api/v1/auth/signup", "/api/v1/auth/login", "/api/v1/auth/refresh")
                         .permitAll()
+                        // PG(포트원) 웹훅은 JWT가 아니라 서명 검증으로 출처를 확인한다(api-design.md 5번).
+                        .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhook").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         // 이벤트 조회는 로그인 없이도 가능(api-design.md 2번).
                         // 경로를 하나로 뭉뚱그리지 않고 메서드별로 명시한다 — /events/{id}/seats,

@@ -298,6 +298,20 @@ public class SeatService {
         releaseHold(accountId, eventId, record);
     }
 
+    /**
+     * 결제 확정(PAYMENT_CONFIRMED)된 예약의 취소(decisions.md 9번, 전액 취소 MVP)에서 쓴다.
+     * {@code compensate}와 달리 이건 이미 "판매 완료"로 seat_status에 HELD로 남아있던 좌석을
+     * 되돌리는 것이라, hold/active_reservation/hold_schedule은 건드리지 않는다 — confirmHold
+     * 시점에 이미 전부 정리돼 있기 때문이다(그 세 키는 진행 중인 홀드에만 존재한다).
+     */
+    public void releaseConfirmed(Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        if (isSeatHold(seatIds)) {
+            seatIds.forEach(seatId -> seatStatusRepository.releaseSeat(eventId, seatId));
+        } else {
+            seatStatusRepository.releaseStanding(eventId, sectionId, quantity);
+        }
+    }
+
     private boolean isSeatHold(List<Long> seatIds) {
         return seatIds != null && !seatIds.isEmpty();
     }
