@@ -87,7 +87,7 @@
 
 1. **2주차 코드 구현 완료** — 좌석 상태 모델 → 홀드 TTL/만료 처리 → Saga 상태머신 → 분산락 두 방식 구현(Redisson RLock / DB 비관적 락). **단, "분산락 최종 채택"(decisions.md 2번)은 아직 열려있는 항목**이고 3주차 부하 테스트에서 닫는다.
 2. **3주차 착수 전에 2주차 개념·시스템 흐름 복습(사용자 확인 완료, 2026-08-20)** — 3주차에 새로 들어가는 개념(Kafka exactly-once 트랜잭션, 실제 PG 웹훅 서명 검증, EKS/ElastiCache/MSK 등 AWS 인프라, 카오스/부하테스트)이 지금까지보다 낯설어서, 코드부터 치기 전에 2주차에 구현한 좌석 홀드/Saga/분산락 흐름을 한 번 정리하고 넘어가기로 함. 결제 웹훅 흐름은 decisions.md/api-design.md에 이미 구체적으로 정리돼 있어 새로 공부할 게 적고, 낯선 건 Kafka exactly-once·인프라 서비스들·Gatling/카오스 테스트 방법론 쪽이라 이 부분 위주로 훑을 것.
-3. **3주차**: ~~Kafka exactly-once → 결제 연동(예약 취소 API 포함)~~ — **2026-08-27 완료**(아래 해당 날짜 항목 참고). 다음은 Nginx → **카오스 테스트 + 부하테스트(Gatling, 분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch는 미도입으로 확정). decisions.md 13번 원래 순서(카오스/부하테스트가 배포보다 먼저)를 따른다 — 로컬에서 정합성/성능을 먼저 검증한 뒤 배포해야지, 검증 안 된 걸 올려서 그때 테스트하는 건 순서가 거꾸로다(2026-08-27 정정).
+3. **3주차**: ~~Kafka exactly-once → 결제 연동(예약 취소 API 포함)~~ — **2026-08-27 완료**(아래 해당 날짜 항목들 참고). **Nginx도 같은 날 코드 작성·자체 검증까지 끝났지만, 사용자가 직접 테스트한 뒤 별도로 커밋/푸시할 예정이라 아직 저장소엔 반영 전이다.** 다음은 **카오스 테스트 + 부하테스트(Gatling, 분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch는 미도입으로 확정). decisions.md 13번 원래 순서(카오스/부하테스트가 배포보다 먼저)를 따른다 — 로컬에서 정합성/성능을 먼저 검증한 뒤 배포해야지, 검증 안 된 걸 올려서 그때 테스트하는 건 순서가 거꾸로다(2026-08-27 정정).
 4. ~~프론트엔드(데모용) 병행 착수~~ — **2026-08-23에 3주차 일정보다 앞당겨 완료**(아래 해당 날짜 항목 참고). 원래 계획(결제 연동 끝난 뒤 끼워 넣기)이 아니라 보고서 작성 도중 사용자가 오늘 바로 진행하기로 결정함(사용자 확인 완료) — 총 작업량은 언제 하든 동일하고, 오히려 3주차 중간에 짬을 내야 하는 부담이 없어져 3주차 일정이 더 여유로워짐.
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
@@ -132,7 +132,16 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **`pg_payment_id`의 실제 의미를 바로잡음**: db-schema.md에 "포트원이 발급"이라고 잘못 적혀 있던 걸, 실제로는 merchant(우리 서버)가 결제 요청 시점에 만들어 부여하는 값(`"TICKETRUSH-{reservationId}"`)이라는 걸로 정정(decisions.md 5번, db-schema.md 5번 반영). 프론트가 포트원 SDK 호출 시 이 값을 그대로 넘겨야 하는데, **프론트의 실제 PG SDK 연동(결제창 호출)은 이번 범위에 포함하지 않았다** — 골든 패스 데모는 여전히 결제 요청 화면에서 끝나고, 결제 확정까지 브라우저로 이어지는 건 다음 단계.
   - **디버깅 중 실제로 겪은 함정 2건(portfolio.md 소재 5로 정리)**: (1) Debezium이 스키마 변경 이벤트를 `topic.prefix`와 같은 이름의 토픽에 발행하려다 브로커의 `auto.create.topics.enable=false` 때문에 무한 재시도에 빠져 커넥터가 `RUNNING` 상태를 유지한 채로 아무것도 발행 못 하고 있었음 — `include.schema.changes=false` + 브로커 옵션 `true`로 해결. (2) Spring Boot 4부터 `spring-kafka` 라이브러리만 추가하면 `KafkaAutoConfiguration`이 전혀 안 붙는다(패키지가 `org.springframework.boot.kafka.autoconfigure`로 분리되어 `spring-boot-starter-kafka`가 별도로 필요, Boot 3까지의 관행과 다름) — 앱이 에러 없이 멀쩡히 기동됐는데도 Kafka 컨슈머 그룹 자체가 생성되지 않는 조용한 실패였다. `build.gradle` 의존성을 스타터로 교체해 해결.
   - **검증**: Node.js e2e 스크립트로 전체 흐름 확인 — 회원가입/승인/이벤트 등록 → 대기열 통과 → 좌석 홀드 → 결제 요청(`pgPaymentId` 발급 확인) → 웹훅 서명 위조 거절(401) → `Transaction.Paid` 웹훅 → `PAYMENT_CONFIRMED` → 별도 계정으로 두 번째 좌석 홀드/결제 요청 → `Transaction.Failed` 웹훅 → outbox INSERT → Debezium → Kafka → `PaymentFailedConsumer` → `SEAT_RELEASED`까지 자동 전이(좌석도 `AVAILABLE`로 복귀) → 확정 예약 취소(`PAYMENT_CONFIRMED → SEAT_RELEASED`, 좌석 복귀) → 재취소 거절(409) → `GET /reservations/me` 확인, 전 과정 통과. `docker exec ... kafka-consumer-groups --describe`로 컨슈머 그룹 LAG 0까지 직접 확인. `gradlew.bat test` 전체 통과(Kafka 컨슈머 빈이 있어도 테스트 컨텍스트 기동에 지장 없음 확인).
-  - **다음으로 미룬 것**: 프론트 PG SDK 연동(결제창 호출), 웹훅 시크릿 실서명 재검증, Nginx 설정, 카오스/부하테스트(로컬), 그 다음 AWS 배포.
+  - **다음으로 미룬 것**: 프론트 PG SDK 연동(결제창 호출), 카오스/부하테스트(로컬), 그 다음 AWS 배포.
+
+- **2026-08-27**: **프론트엔드 "내 예약" 화면 추가 (같은 세션 이어서 진행).**
+  - **프론트엔드**: `ReservationsPage`(`GET /reservations/me` 목록 + `PAYMENT_CONFIRMED`인 예약에만 취소 버튼) 신규 추가, 헤더 네비게이션에 "내 예약" 링크 추가. `SeatHoldPage`의 결제 요청 완료 화면을 정적 문구 대신 **`GET /reservations/{id}`를 2초 간격으로 폴링**해서 `PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED` 결과가 실제로 반영되도록 바꿈(웹훅이 오면 화면이 자동으로 갱신됨). `pgPaymentId` 필드도 타입에 반영. `npx tsc -b`/`oxlint`/`vite build` 전부 통과, 프론트가 보내는 것과 동일한 헤더(Origin 포함)로 `GET /reservations/me`·`POST .../cancel`을 직접 호출해 계약도 재확인했다. **다만 이 세션엔 브라우저 조작 도구가 없어 실제 클릭 테스트는 못 했다** — 사용자가 직접 `localhost:5173`에서 확인 필요(2026-08-23 프론트 완료 때와 동일한 제약).
+  - **웹훅 시크릿 실제 값 반영**: 사용자가 포트원 콘솔에서 실제 웹훅 시크릿을 찾아 `.env`에 넣음. 백엔드를 재시작해 반영하고, 예전 로컬 테스트용 시크릿으로 서명한 웹훅이 이제 401로 거절되는 것까지 확인해 **실제 시크릿이 적용된 상태**임을 검증했다(실제 웹훅 이벤트로 서명 형식 자체가 맞는지는 여전히 미확인 — 위 항목 참고).
+  - **다음으로 미룬 것**: 프론트 PG SDK 연동(결제창 호출), Nginx(코드는 작성됐으나 사용자가 직접 테스트 후 별도로 커밋할 예정 — 아래 항목 참고), 카오스/부하테스트, AWS 배포.
+
+- **2026-08-27**: **Nginx 추가(로컬, 대기열 진입 API 앞단 Rate Limiting) — 코드 작성 및 자체 검증 완료, 커밋은 사용자가 직접 테스트 후 별도로 진행 예정.** `nginx/nginx.conf` + `docker-compose.yml`에 `nginx` 서비스 추가(포트 8081 → 컨테이너 80). decisions.md 4번 범위 그대로 — **대기열 진입 API(`POST /events/{id}/queue/entries`)만** `limit_req_zone`(5r/s, burst 10)으로 제한하고, 순번 폴링(GET .../me)이나 다른 API는 그대로 통과시킨다. 백엔드가 아직 컨테이너화되지 않아(Dockerfile 미착수) `host.docker.internal`로 호스트의 `gradlew bootRun` 프로세스를 그대로 가리킨다. rate/burst 수치는 다른 TTL류와 마찬가지로 placeholder — 3주차 Gatling 부하테스트에서 조정한다.
+  - **검증(구현 중 직접 확인한 것)**: 대기열 진입 API에 연속 20회 요청 시 뒤쪽이 429로 거절되는 것 확인, 반면 이벤트 목록 조회(`GET /events`)와 순번 폴링(`GET .../queue/entries/me`)은 동일하게 연속 20회를 쏴도 전부 정상 응답(429 없음)인 것으로 스코프가 의도대로 좁게 걸렸는지 확인했다.
+  - **다음으로 미룬 것**: 프론트 정적 파일을 Nginx가 서빙하는 것(AWS 배포 단계에서 진행, 지금은 Vite dev server 그대로), 사용자의 자체 테스트 및 커밋/푸시.
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
