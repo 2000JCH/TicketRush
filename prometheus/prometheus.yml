@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 1s
+
+scrape_configs:
+  - job_name: ticketrush
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # 백엔드가 아직 컨테이너화되지 않아(Dockerfile 미착수) 호스트의 gradlew bootRun을 가리킨다
+      # (nginx.conf와 동일한 패턴, decisions.md 4번 참고).
+      - targets:
+          - host.docker.internal:8080

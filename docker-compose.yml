@@ -78,6 +78,47 @@ services:
       OFFSET_STORAGE_TOPIC: debezium-offsets
       STATUS_STORAGE_TOPIC: debezium-status
 
+  nginx:
+    image: nginx:1.27
+    container_name: ticketrush-nginx
+    ports:
+      - "8081:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    extra_hosts:
+      # Windows Docker Desktop은 기본 제공하지만, 다른 환경에서도 동작하도록 명시한다.
+      - "host.docker.internal:host-gateway"
+
+  # 카오스/부하테스트 관찰용(3주차, classq 참고 — 구조만 참고하고 우리 스택에 맞게 새로 구성함).
+  # Actuator+Micrometer 덕분에 백엔드 하나만 스크랩해도 API 응답시간/에러율·HikariCP 커넥션 풀·
+  # Kafka Consumer lag까지 전부 잡힌다(별도 exporter 불필요) — Prometheus 설정도 그래서 단순하다.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: ticketrush-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: ticketrush-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # 기본값(admin)과 같지만 명시한다 — 로컬 전용이라 그대로 둔다.
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      # 카오스 테스트 중 타임라인에 남기는 주석(annotation)·패널 편집이 docker compose down 후에도
+      # 남도록 Grafana 상태를 볼륨에 둔다. 대시보드 자체는 이후 provisioning 파일로 관리한다.
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
 volumes:
   mysql_data:
   redis_data:
+  grafana_data:

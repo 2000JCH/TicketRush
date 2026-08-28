@@ -30,6 +30,11 @@ dependencies {
 	// 실제로 spring-kafka만 넣었다가 @KafkaListener가 전혀 등록되지 않는 걸 겪고 알아낸 것
 	// (2026-08-27, spring-boot #48880/spring-kafka #4278).
 	implementation 'org.springframework.boot:spring-boot-starter-kafka'
+	// 카오스/부하테스트 관찰용(3주차). Actuator + Micrometer만 추가하면 API 응답시간/에러율뿐 아니라
+	// HikariCP 커넥션 풀·Kafka Consumer lag까지 /actuator/prometheus에 자동으로 노출된다
+	// (Spring Boot가 두 클라이언트를 Micrometer에 자동 바인딩) — 별도 exporter가 필요 없다.
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 	implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
 	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
 	// jjwt의 JSON 직렬화기. jjwt-jackson은 Jackson 2를 요구하는데 Spring Boot 4는 Jackson 3을 쓰므로 gson을 쓴다.

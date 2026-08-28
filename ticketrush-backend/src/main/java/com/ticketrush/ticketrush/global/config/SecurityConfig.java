@@ -80,6 +80,10 @@ public class SecurityConfig {
                         .permitAll()
                         // PG(포트원) 웹훅은 JWT가 아니라 서명 검증으로 출처를 확인한다(api-design.md 5번).
                         .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhook").permitAll()
+                        // Prometheus가 인증 없이 스크랩할 수 있어야 한다(카오스/부하테스트 관찰용, 3주차).
+                        // 로컬 전용이라 지금은 인증을 걸지 않는다 — 실배포 시엔 네트워크 레벨(사설 서브넷 등)로
+                        // 막는 것이 JWT를 붙이는 것보다 Prometheus 표준 관행에 가깝다.
+                        .requestMatchers("/actuator/**").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         // 이벤트 조회는 로그인 없이도 가능(api-design.md 2번).
                         // 경로를 하나로 뭉뚱그리지 않고 메서드별로 명시한다 — /events/{id}/seats,
