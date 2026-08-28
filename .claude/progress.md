@@ -80,7 +80,12 @@
    - **스모크 검증**: 5·8 유저로 전체 골든 패스 실행 → KO 0, 모든 스텝(signup/login/queue/seat-list/seat-hold/payment-request) 통과 확인.
 4. ✅ Pumba — `scripts/chaos-redis.ps1`·`scripts/chaos-kafka.ps1`(`gaiaadm/pumba:0.11.6` `docker run`, `stop --restart --duration`). redis 대상으로 실제 stop→15s→restart→PING 복구까지 확인. compose 상시 서비스로 넣지 않고 스크립트로 온디맨드 실행(재현성).
 
-**카오스 시나리오(Phase 2) — 다음:** ① Redis 다운 → rebuild·오버셀 0 ② Kafka 다운 → 결제 확정 지속·outbox 적재·복구 후 발행. 각 시나리오는 `run-gatling.ps1`으로 부하를 흘리는 중에 `chaos-*.ps1`을 실행하고 Grafana 대시보드로 관찰. 정합성(오버셀 0)은 실행 후 DB/Redis 상태로 별도 확인.
+**테스트 계획 문서화(2026-08-28) — 실행 전 완료:**
+- `.claude/docs/test-plan.md` 신규 — 목표 수치(기준선, 각 값에 근거)·카오스 2 시나리오·분산락 벤치마크·**한계 테스트**·절차·합격 기준을 실행 전에 못박음. 멘토 피드백 2건 반영: ① 목표 수치를 미리 적어두지 않으면 결과를 판단할 근거가 없음 → 1번에 정합성/성능/복구 기준선. ② 처리량뿐 아니라 P99·락 실패 형태 → 3번 판정 규칙. 추가로 "몇 명까지 버티나" 한계 테스트(4번)가 그동안 빠져 있던 걸 넣음(classq `StressTestSimulation` 대응).
+- `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
+- 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
+
+**Phase 2 (다음, 사용자 신호 대기) — 실행:** test-plan.md 2번 카오스 2개 → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트. 절차·합격 기준은 전부 test-plan.md에 있음.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 
