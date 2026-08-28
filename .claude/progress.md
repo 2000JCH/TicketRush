@@ -63,9 +63,26 @@
 
 ## 다음 작업
 
-**바로 다음 할 일: 카오스 테스트(Pumba, Redis/Kafka 장애 2개 시나리오)부터 시작.** → 부하 테스트(Gatling, 분산락 최종 채택 포함) → AWS 배포 순서로 이어간다(decisions.md 13번).
+**진행 순서: 카오스 테스트 → 부하 테스트(분산락 최종 채택 포함) → AWS 배포**(decisions.md 13번). 카오스/부하 둘 다 로컬 Docker Compose 대상.
 
-**일정 관련(2026-08-27 확정, 사용자 확인 완료)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 다 끝내는 것을 목표로 한다** — 원래 "4주차는 3주차 테스트 마무리만 하는 버퍼"로 설계돼 있었지만, 사용자가 3주차 안에 완결하고 싶다고 확정함. 4일(08-27~08-30) 안에 복습+카오스+부하+배포를 다 넣어야 해서 일정이 빠듯하다는 점을 사용자와 공유·확인함. **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐.
+**2026-08-28 세션에서 정리된 것(사용자 확인 완료):**
+- **카오스 중 부하 발생 = Gatling으로 통일**(별도 스크립트 안 만듦). 부하테스트에서 어차피 필요한 Gatling 시나리오를 먼저 작성해 카오스에도 재사용한다(decisions.md 8번 반영).
+- **분산락 채택 기준에 P99·락 실패 응답 형태 추가**(멘토 피드백, decisions.md 2번 반영). 처리량만 보지 않고 그룹 홀드 P99를 동등 지표로, 락 실패가 "즉시냐 대기 후냐"도 관찰. → 벤치마크 전에 **DB 비관적 락에 lock timeout을 걸고 실패를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑하는 선행 수정**이 필요(현재는 MySQL 기본 50초 블로킹 후 500).
+- **AWS 인스턴스: m계열 방향**(classq는 c계열이지만 우리는 EC2 한 대에 스택 전부 공존 → RAM도 병목). 잠정 `m6i.xlarge` + RDS는 락 결과에 따라. 상세·확정은 `.claude/docs/aws-spec.md`(신규, A·B 작성 완료 / C·D는 로컬 부하테스트 후 / E는 AWS 배포 후).
+- **실제 배포까지 한다(2026-08-28 확정, 사용자 확인 완료)**: classq는 `aws-spec.md`를 예측까지만 쓰고 배포는 안 했다 — TicketRush는 EC2+RDS에 실제로 올리고 AWS에서 Gatling을 다시 돌려 예측표(D·E)를 실측으로 검증한다. "같은 프로젝트 반복"으로 안 보이게 하려는 것(decisions.md 10번). 카오스 테스트는 로컬만, AWS 재측정은 부하 테스트만.
+
+**카오스 테스트 준비(Phase 1) — 2026-08-28 완료, 스모크 검증까지:**
+1. ✅ `application.properties` — `management.metrics.distribution.percentiles-histogram.http.server.requests=true` + `slo` 버킷(200ms~10s). Micrometer 기본은 count/sum/max만이라 이게 없으면 P99가 안 나온다.
+2. ✅ Grafana 대시보드 provisioning — `grafana/dashboards/ticketrush.json`(uid `ticketrush-load`, 4패널: 응답시간 P50/P95/P99 · 상태코드별 요청/에러율 · Kafka Consumer lag · HikariCP) + `uri` 템플릿 변수. `grafana/provisioning/dashboards/dashboard.yml` 파일 프로바이더, `docker-compose.yml`에 `./grafana/dashboards` 마운트. 4개 패널 쿼리가 실제 데이터를 반환하는 것까지 확인(P99≈90ms 등).
+3. ✅ Gatling — `io.gatling.gradle` 플러그인 `3.15.1.3`(3.13.5는 Gradle 9와 비호환 — `reportsDir` 에러). `src/gatling/java/simulation/GoldenPathSimulation.java`(가입→로그인→대기열 진입/폴링→좌석 조회→홀드→결제 요청). 좌석 ID는 시나리오가 `GET /seats` 응답에서 직접 뽑는다(seed가 DB를 안 건드려도 되도록). `-Dgroup.hold.ratio`로 그룹 홀드 비중 조절(벤치마크는 1.0).
+   - `scripts/seed-load-test.ps1`(순수 REST — ORGANIZER 승인 + 이벤트/SEATED 구역 등록 + openAt를 미래로 두고 대기. **docker/DB 접근 없음** — 처음엔 `docker exec mysql`을 썼다가 Windows PowerShell에 docker CLI가 없어 "앱 선택" 팝업이 떠서 제거함).
+   - `scripts/run-gatling.ps1`(래퍼 — PowerShell이 인라인 `-Dfoo.bar=baz`를 깨먹어서 `@args` splat 필요).
+   - **스모크 검증**: 5·8 유저로 전체 골든 패스 실행 → KO 0, 모든 스텝(signup/login/queue/seat-list/seat-hold/payment-request) 통과 확인.
+4. ✅ Pumba — `scripts/chaos-redis.ps1`·`scripts/chaos-kafka.ps1`(`gaiaadm/pumba:0.11.6` `docker run`, `stop --restart --duration`). redis 대상으로 실제 stop→15s→restart→PING 복구까지 확인. compose 상시 서비스로 넣지 않고 스크립트로 온디맨드 실행(재현성).
+
+**카오스 시나리오(Phase 2) — 다음:** ① Redis 다운 → rebuild·오버셀 0 ② Kafka 다운 → 결제 확정 지속·outbox 적재·복구 후 발행. 각 시나리오는 `run-gatling.ps1`으로 부하를 흘리는 중에 `chaos-*.ps1`을 실행하고 Grafana 대시보드로 관찰. 정합성(오버셀 0)은 실행 후 DB/Redis 상태로 별도 확인.
+
+**일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
 
@@ -122,7 +139,13 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **다음으로 미룬 것**: 실제 대시보드 패널 구성(카오스/부하테스트 시작 시점에 만드는 게 더 자연스러움 — provisioning 파일로 관리 예정).
   - **2026-08-28 재검증 후 커밋**: 인프라를 전부 띄우고 `gradlew clean build`(테스트 17개 포함) 통과 확인, 앱 기동 후 `/actuator/prometheus`의 3개 지표(`hikaricp_connections`·`http_server_requests_seconds`·`kafka_consumer_*`)·Prometheus 타깃 `up`·Grafana→Prometheus 데이터소스 헬스체크 OK·Nginx 진입 API 20연타 시 뒤쪽 429까지 재확인. 이 과정에서 `grafana_data` 볼륨과 `GF_SECURITY_ADMIN_PASSWORD`를 추가(classq 정렬). Nginx는 2026-08-27 자체 검증 상태 그대로 함께 커밋.
 
-- **2026-08-27**: **일정 재확인 — 3주차 안에 카오스/부하테스트/AWS 배포까지 다 끝내기로 확정(사용자 확인 완료).** 원래 "4주차는 3주차 테스트 마무리 버퍼"로 설계돼 있었지만, 사용자가 4주차로 넘기지 않고 3주차(~08-30) 안에 완결하고 싶다고 확정함. 오늘 포함 4일(08-27~08-30) 안에 "1~3주차 흐름 복습 + 카오스 테스트 + 부하테스트(분산락 결정 포함) + AWS 배포"를 다 넣어야 해서 상당히 빠듯하다는 점을 사용자와 공유·확인했다(제안한 완화책: 복습은 별도 시간 잡지 말고 필요할 때 문서를 짧게 참고하는 식으로, 카오스 시나리오는 decisions.md 8번 최소 범위인 Redis/Kafka 2개만). **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐, IAM 키/CLI 설정 여부는 아직 미확인. **다음 세션은 카오스 테스트(Pumba)부터 시작.**
+- **2026-08-27**: **일정 재확인 — 3주차 안에 카오스/부하테스트/AWS 배포까지 다 끝내기로 확정(사용자 확인 완료).** 원래 "4주차는 3주차 테스트 마무리 버퍼"로 설계돼 있었지만, 사용자가 4주차로 넘기지 않고 3주차(~08-30) 안에 완결하고 싶다고 확정함. 오늘 포함 4일(08-27~08-30) 안에 "1~3주차 흐름 복습 + 카오스 테스트 + 부하테스트(분산락 결정 포함) + AWS 배포"를 다 넣어야 해서 상당히 빠듯하다는 점을 사용자와 공유·확인했다(제안한 완화책: 복습은 별도 시간 잡지 말고 필요할 때 문서를 짧게 참고하는 식으로, 카오스 시나리오는 decisions.md 8번 최소 범위인 Redis/Kafka 2개만). **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐, IAM 키/CLI 설정 여부는 아직 미확인.
+
+- **2026-08-28**: **카오스 테스트 준비(Phase 1) 완료 — 문서 정리 + Gatling·Grafana 대시보드·Pumba 셋업, 스모크 검증까지.** 위 "다음 작업 > 카오스 테스트 준비(Phase 1)" 4개 항목 참고.
+  - **문서(Phase 0)**: `decisions.md` 2번(분산락 채택 기준에 P99·락 실패 응답 형태 추가, 멘토 피드백)·8번(카오스 부하도 Gatling)·10번(EC2 m계열/RDS는 락 결과 의존), 신규 `.claude/docs/aws-spec.md`(A·B 작성, C·D·E는 부하테스트 후), `progress.md`·`CLAUDE.md`.
+  - **코드/설정**: `application.properties`에 P99 히스토그램+SLO 버킷, `build.gradle`에 Gatling 플러그인, `src/gatling/java/simulation/GoldenPathSimulation.java`, `grafana/dashboards/ticketrush.json`+`grafana/provisioning/dashboards/dashboard.yml`+`docker-compose.yml` 대시보드 마운트, 스크립트 4종(`seed-load-test.ps1`·`run-gatling.ps1`·`chaos-redis.ps1`·`chaos-kafka.ps1`).
+  - **검증**: Gatling 5·8 유저 스모크 → KO 0 전 스텝 통과. Grafana 대시보드 4패널 쿼리 실데이터 반환 확인. Pumba redis stop→restart→PING 복구 확인. `gatlingClasses` 컴파일 통과.
+  - **다음(Phase 2)**: 두 카오스 시나리오 실제 실행. 그 전 또는 부하테스트 착수 시 **DB 비관적 락 timeout 선행 수정**(위 "시점이 정해진 결정 > 분산락 기술" 참고).
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
@@ -136,9 +159,11 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 ### 시점이 정해진 결정 (해당 주차 되면 확정)
 
-- **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 두 구현은 2026-08-20에 완료(`GroupHoldLockStrategy`), 실제 채택은 **3주차 부하테스트**에서 Gatling 실측 후 이미 정해진 채택 기준(정합성 우선 → 처리량 차이 20%p 이상이면 우세한 쪽, 미만이면 DB 락)에 따라 확정
+- **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 두 구현은 2026-08-20에 완료(`GroupHoldLockStrategy`), 실제 채택은 **3주차 부하테스트**에서 Gatling 실측 후 채택 기준에 따라 확정. **채택 기준 2026-08-28 보강(멘토 피드백)**: 처리량뿐 아니라 그룹 홀드 P99를 동등 지표로 보고, 둘이 다른 방향이면 P99 우선. 락 실패 응답 형태(즉시/대기 후)도 관찰.
+  - **선행 수정(벤치마크 착수 전)**: `DbPessimisticLockGroupHoldLockStrategy`에 lock timeout을 Redisson `group-hold.lock-wait-millis`와 같은 수준으로 걸고, 타임아웃 예외를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑한다. 현재는 timeout 미지정이라 MySQL 기본 `innodb_lock_wait_timeout`(50초) 블로킹 후 일반 500으로 새서, Redisson 구현과 실패 방식이 달라 공정 비교가 안 된다.
 - **대기열 이탈률 섞은 부하테스트 시나리오**(decisions.md 4번, 2026-08-27 확인): 대기열 이탈자가 있어도 뒤쪽 순번이 밀리지는 않는 것은 코드로 확인됨(`EntryTokenScheduler`가 고정 인원만큼 무조건 빼고 대기열에서 제거). 다만 `queue.admit-count`가 이탈률을 고려하지 않은 고정값이라, 이탈률이 높으면 실사용자 입장 처리가 희석돼 체감 대기시간이 늘어날 수 있음 — 3주차 Gatling 부하테스트에 이탈률을 섞은 시나리오를 추가해 실측 예정
 - **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 인프라 도입 여부는 2026-08-27에 확정(decisions.md 10번, EKS/ElastiCache/MSK/CloudWatch 미도입)됐으니 실제 배포 단계에서 표를 채운다
+- **AWS 인스턴스 스펙 확정**(`.claude/docs/aws-spec.md`, 2026-08-28 신규): 계열은 m계열로 방향 확정(A·B 섹션 작성 완료 — classq는 앱 전용 c계열이지만 우리는 EC2 한 대에 Boot+Redis+Kafka+Connect+Nginx 공존이라 RAM도 병목). 잠정 `m6i.xlarge` / RDS `db.m6i.large`(DB 락 채택 시 `db.r6i.large`). 실제 크기·성능 예측·SLO(C·D·E)는 **로컬 Gatling 부하테스트 실측 후** classq와 같은 방식으로 채운다 — 아래 "성능/처리량 목표치"도 그때 함께 닫힌다
 
 ### 여유 있을 때 아무 때나 결정 가능 (일정과 무관, decisions.md 11번에서 정리된 항목)
 
