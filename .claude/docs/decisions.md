@@ -79,7 +79,7 @@
   - 상태: `SEAT_HELD → PAYMENT_REQUESTED → PAYMENT_CONFIRMED` (정상) / `→ PAYMENT_FAILED → SEAT_RELEASED` (보상) / TTL 만료 시에도 동일 Consumer가 처리
 - **예약/결제 테이블 구조: `reservation` 단일 테이블로 확정 (좌석 점유 + 결제 기록을 별도 테이블로 분리하는 안은 채택 안 함).** PG를 포트원 경유로 쓰기로 해 PG사 메타데이터 확장 부담이 적고, 상태 컬럼 하나로 Saga 상태머신을 단순하게 유지하는 쪽이 8번 카오스 테스트 검증에 유리하기 때문. (이후 그룹 홀드 지원을 위해 좌석 정보만 `reservation_seat` 자식 테이블로 별도 분리했지만, 이건 "결제 정보 분리"가 아니라 "한 예약에 좌석이 여러 개 담기는 것"을 표현하기 위한 것이라 이 결정과는 다른 축이다 — db-schema.md 5·6번 참고.)
 - **PG사: 포트원 V2 경유로 토스페이먼츠(카드) + 카카오페이(간편결제) 2개 채널을 동시 지원하기로 확정(사용자 확인 완료, 1주차 웹훅 스모크테스트 진행 중 결정).** V2는 PG사와 무관하게 웹훅 페이로드/서명 검증 방식을 통일하므로, 채널이 2개여도 웹훅 수신·서명 검증·결제 확정 로직은 PG사별 분기 없이 하나로 처리한다. 결제 요청 시 프론트가 `channelKey`로 어느 채널을 쓸지만 선택하면 되고, 이 선택은 백엔드 결제 API에는 영향을 주지 않는다.
-- **웹훅 서명 검증 방식(3주차 결제 연동, 가정 — 실서명 미검증)**: 1주차 스모크테스트 로그에 `webhook-signature` 헤더가 그대로 찍혔던 걸 근거로 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙(`webhook-id`/`webhook-timestamp`/`webhook-signature` + HMAC-SHA256)을 따른다고 가정하고 구현했다. `PORTONE_WEBHOOK_SECRET`을 콘솔에서 아직 못 찾아 실제 서명으로 검증해본 적은 없음 — 발급받으면 재확인 필요(progress.md 추적). 시크릿이 비어있으면 모든 웹훅을 무조건 거절한다(빈 값 통과보다 안전).
+- **웹훅 서명 검증 방식(3주차 결제 연동, 가정 — 실결제 이벤트로는 아직 미검증)**: 1주차 스모크테스트 로그에 `webhook-signature` 헤더가 그대로 찍혔던 걸 근거로 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙(`webhook-id`/`webhook-timestamp`/`webhook-signature` + HMAC-SHA256)을 따른다고 가정하고 구현했다. **`PORTONE_WEBHOOK_SECRET`은 2026-08-27에 사용자가 콘솔에서 찾아 `.env`에 반영 완료** — 다만 콘솔 "호출 테스트"는 서명 헤더 없이 오므로(1주차에 확인) 이 가정이 실제로 맞는지는 실결제 이벤트가 와야 최종 확인된다(progress.md 추적, 프론트 PG SDK 연동 이후로 넘어감). 시크릿이 비어있으면 모든 웹훅을 무조건 거절한다(빈 값 통과보다 안전).
 - **웹훅 재검증 단순화(알려진 한계)**: 웹훅 body(`type`/`data.paymentId`)의 값을 그대로 신뢰해 결제 확정/실패를 판단한다. 원칙적으로는 포트원 결제 조회 API(GetPayment)로 서버 대 서버 재검증을 해야 하지만, 실제 결제 채널(카드/카카오페이) 프론트 SDK 연동이 아직 없어 검증할 대상 자체가 없다 — 프론트 PG 연동이 이어지는 시점에 함께 보강한다.
 - **`pg_payment_id`의 실제 의미 정정**: db-schema.md에는 원래 "포트원이 발급하는 값"으로 적혀 있었으나, 실제 PortOne 연동 방식은 반대다 — **merchant(우리 서버)가 결제 요청 시점에 생성해 부여하는 식별자**(`"TICKETRUSH-{reservationId}"`)이고, 프론트가 포트원 SDK 호출 시 이 값을 그대로 넘긴다. 웹훅이 이 값을 담아 돌아오므로 이걸로 예약을 역조회한다(db-schema.md 5번에 반영 완료).
 
@@ -121,6 +121,7 @@
   → 신입 채용 포트폴리오 관점에서 "관리형 서비스를 써봤다" 자체는 변별력이 낮고, 오히려 채택 근거를 설명 못 하면 역효과가 난다. 이 프로젝트에서 실제로 강한 소재는 **분산락 두 방식을 직접 구현·실측해 근거를 갖고 선택한 것**(2번)이라, 인프라를 넓게 벌리는 대신 그 비교 결과를 정리하는 데 시간을 쓰기로 함.
   → Redis와 Kafka(Kafka Connect+Debezium 포함)도 로컬 `docker-compose.yml`과 동일하게 **EC2 위에서 Docker Compose로 그대로 운영**한다 — 별도 관리형 서비스로 옮기지 않음. MySQL만 RDS(관리형)를 쓰는 이유는 이미 원래 계획(1주차 이전)에 있던 결정이라 그대로 유지.
   → CloudWatch도 이번엔 별도로 구성하지 않는다(로그/모니터링은 범위 밖).
+- **모니터링(로컬 한정): Prometheus + Grafana는 추가한다(2026-08-27, 사용자 확인 완료) — 위 CloudWatch 배제와는 별개 결정이다.** CloudWatch는 AWS가 관리해주는 서비스라 뺐지만, Prometheus/Grafana는 우리가 직접 Docker Compose로 띄우는 것이라 "관리형 서비스 배제" 이유가 적용되지 않는다. 카오스/부하테스트(Gatling·Pumba) 결과를 실시간으로 관찰하고 portfolio.md의 성능 수치 근거로 남기기 위한 것 — classq(참고 프로젝트)가 부하테스트 때 쓴 구조를 참고했다(구조만 참고, 실제 설정은 우리 스택에 맞게 새로 작성). **범위는 로컬만**(AWS 배포에는 포함하지 않음), **지켜보는 항목은 API 응답시간/에러율·Kafka Consumer lag·DB 커넥션 풀(HikariCP)** 3가지로 classq와 동일하게 맞췄다. `spring-boot-starter-actuator`+`micrometer-registry-prometheus`만 추가하면 이 3가지가 별도 exporter 없이 `/actuator/prometheus`에서 전부 잡힌다(Spring Boot가 HikariCP/Kafka 클라이언트를 Micrometer에 자동 바인딩) — 실제로 확인 완료(progress.md 참고). `/actuator/**`는 로컬 전용으로 인증 없이 열어뒀다(`SecurityConfig`).
 
 ## 11. 미확정 사항 (추후 결정)
 

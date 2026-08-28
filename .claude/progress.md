@@ -1,28 +1,6 @@
 # TicketRush — 진행 상황
 
-## 현재 상태 (요약)
-
-`db-schema.md` + `redis-design.md` 본격 작성 완료. `standing:remaining` 키를 좌석 상태 Hash에 통합, 스탠딩 예약에도 `idempotency_key` 기반 유니크 제약 적용, `rebuild:in_progress` 플래그는 이벤트 단위로 확정하고 반영함. `SEAT_HELD`(좌석 찜 상태)는 Redis에만 두고 DB `reservation.status` ENUM에는 넣지 않기로 확정(결제 요청 시점부터 DB 기록 시작) — 사용자 확인 완료.
-
-문서 5개(decisions/architecture/db-schema/redis-design/progress) 전체 일관성 점검 완료. `idempotency_key` NULL 허용 버그, architecture.md의 옛 Redis 키 이름 잔존, `hold` 키를 `PERSIST`하면 PG 웹훅 타임아웃을 아무도 감지 못하는 설계 구멍 등을 찾아 수정함(수정 내역은 각 문서 및 아래 항목 참고).
-
-`api-design.md` 작성 완료 — 인증/이벤트/대기열/좌석/결제·예약/관리자 6개 도메인. 작성 후 전체 문서 재점검해서 redis-design.md의 입장 토큰 미결 표시, api-design.md의 404 설명 모순을 정리함. ORGANIZER 가입은 ADMIN 승인 필요로 확정하고 관련 문서(db-schema/decisions/api-design) 전부 반영 완료.
-
-**사재기 방지 정책 확정 및 스키마 재작업 완료**: 계정당 이벤트별 동시 진행 예약 1건 제한(Redis `active_reservation:{eventId}:{accountId}`) + 한 예약(그룹 홀드 포함)당 최대 2매 + 이벤트당 누적 확정 매수 최대 2매, 3중으로 사재기를 막기로 확정. 이 과정에서 그룹 홀드(분산락 벤치마크 대상)를 없앨지 논의했으나 **분산락 벤치마크(decisions.md 2번)를 유지하는 쪽으로 확정** — "좌석 개수 제한"이 아니라 "동시 진행 시도 개수 제한"으로 사재기 방지를 재해석해서 그룹 홀드 기능과 양립시킴. `reservation` 테이블은 "예약 1건 = 좌석 1개"에서 "예약 1건 = 결제 시도 1건(좌석 1~2개)"으로 재구성하고, 좌석 정보는 자식 테이블 `reservation_seat`로 분리(db-schema.md 5·6번). decisions.md/architecture.md/redis-design.md/api-design.md 전부 반영 완료.
-
-**ADMIN 모니터링 기능 확정**: `GET /api/v1/admin/events/{eventId}/stats`로 판매 현황(확정/진행중 매수)과 좌석 점유율을 조회. 새 데이터를 만들지 않고 기존 Redis(`seat_status:{eventId}`)/DB(`idx_event_status`)를 그대로 읽기만 하며, 화면 자동 갱신(SSE/웹소켓)은 만들지 않고 폴링으로 처리(api-design.md 6번). **모든 설계 문서 1차 완료.** (이후 1주차 구현이 전부 끝났고 현재 2주차 진행 중 — 아래 "구현 진행 상황" 참고)
-
-## 문서화 진행 상황 (`.claude/docs/`)
-
-| 문서 | 상태 | 비고 |
-|---|---|---|
-| `decisions.md` | 거의 완료 | 13개 섹션(12번: 이벤트/좌석 도메인 모델 추가). 11번에 미확정 사항이 정리되어 있음 |
-| `architecture.md` | 작성 완료 | classq 스타일(표/텍스트 위주, mermaid 미사용)로 통일됨 |
-| `db-schema.md` | 작성 완료 | account/event/section/seat/reservation/reservation_seat/outbox_events 7개 테이블 |
-| `redis-design.md` | 작성 완료 | classq 스타일(키별 블록 + 전체 요약 표)로 통일 |
-| `api-design.md` | 작성 완료 | classq 스타일(도메인별 표+JSON 예시+에러코드 표)로 통일 |
-| `progress.md` | 이 문서 | |
-| `../portfolio.md` | 작성 시작 | 이력서/포트폴리오용 "문제와 해결" 소재 모음(`.claude/portfolio.md`). 2026-08-16 생성, 현재 4건 수록 + 앞으로 나올 소재 목록 |
+설계 문서(`decisions.md`/`architecture.md`/`db-schema.md`/`redis-design.md`/`api-design.md`)는 1차 작성이 전부 끝난 상태이고, 이후 구현 단계에서 드러난 세부 사항은 그때그때 각 문서에 직접 반영한다 — 여기 별도로 요약해두지 않는다(중복·오래된 스냅샷이 되기 쉬워 2026-08-27에 정리함). 지금 진행 상황은 아래 "구현 진행 상황"의 가장 최근 날짜 항목과 "주차별 일정" 표를 보면 된다.
 
 ## 구현 진행 상황
 
@@ -83,12 +61,11 @@
   - **자동 테스트로 검증**: `SeatServiceGroupHoldTest`(기본 프로퍼티=Redisson, 5개 케이스: 그룹 홀드 성공/중복 좌석 거절/3개 이상 거절/한 좌석 선점 시 롤백/동시 요청 8개 중 1개만 성공)와 `SeatServiceGroupHoldDbLockTest`(`@SpringBootTest(properties = "group-hold.lock-strategy=db")`로 별도 스프링 컨텍스트, 같은 핵심 시나리오 3개 재검증) — 두 파일 다 오버셀 0건을 동시성 테스트(`ExecutorService` 8스레드가 같은 좌석 쌍을 동시에 시도)로 직접 확인했다. 전체 테스트(`ReservationServiceTest` 8 + 이 두 파일 8 + 기존 1)까지 `gradlew.bat test` 17개 전부 통과.
   - **다음 단계로 미룬 것**: Gatling 시나리오 작성, 실측 처리량/지연/에러율 비교, 최종 락 방식 채택(decisions.md 2번) — 전부 3주차 부하 테스트. `portfolio.md`의 "분산락 벤치마크" 소재(192번째 줄 표)는 그 실측이 끝난 뒤에 채운다.
 
-## 다음 작업 순서
+## 다음 작업
 
-1. **2주차 코드 구현 완료** — 좌석 상태 모델 → 홀드 TTL/만료 처리 → Saga 상태머신 → 분산락 두 방식 구현(Redisson RLock / DB 비관적 락). **단, "분산락 최종 채택"(decisions.md 2번)은 아직 열려있는 항목**이고 3주차 부하 테스트에서 닫는다.
-2. **3주차 착수 전에 2주차 개념·시스템 흐름 복습(사용자 확인 완료, 2026-08-20)** — 3주차에 새로 들어가는 개념(Kafka exactly-once 트랜잭션, 실제 PG 웹훅 서명 검증, EKS/ElastiCache/MSK 등 AWS 인프라, 카오스/부하테스트)이 지금까지보다 낯설어서, 코드부터 치기 전에 2주차에 구현한 좌석 홀드/Saga/분산락 흐름을 한 번 정리하고 넘어가기로 함. 결제 웹훅 흐름은 decisions.md/api-design.md에 이미 구체적으로 정리돼 있어 새로 공부할 게 적고, 낯선 건 Kafka exactly-once·인프라 서비스들·Gatling/카오스 테스트 방법론 쪽이라 이 부분 위주로 훑을 것.
-3. **3주차**: ~~Kafka exactly-once → 결제 연동(예약 취소 API 포함)~~ — **2026-08-27 완료**(아래 해당 날짜 항목들 참고). **Nginx도 같은 날 코드 작성·자체 검증까지 끝났지만, 사용자가 직접 테스트한 뒤 별도로 커밋/푸시할 예정이라 아직 저장소엔 반영 전이다.** 다음은 **카오스 테스트 + 부하테스트(Gatling, 분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch는 미도입으로 확정). decisions.md 13번 원래 순서(카오스/부하테스트가 배포보다 먼저)를 따른다 — 로컬에서 정합성/성능을 먼저 검증한 뒤 배포해야지, 검증 안 된 걸 올려서 그때 테스트하는 건 순서가 거꾸로다(2026-08-27 정정).
-4. ~~프론트엔드(데모용) 병행 착수~~ — **2026-08-23에 3주차 일정보다 앞당겨 완료**(아래 해당 날짜 항목 참고). 원래 계획(결제 연동 끝난 뒤 끼워 넣기)이 아니라 보고서 작성 도중 사용자가 오늘 바로 진행하기로 결정함(사용자 확인 완료) — 총 작업량은 언제 하든 동일하고, 오히려 3주차 중간에 짬을 내야 하는 부담이 없어져 3주차 일정이 더 여유로워짐.
+**바로 다음 할 일: 카오스 테스트(Pumba, Redis/Kafka 장애 2개 시나리오)부터 시작.** → 부하 테스트(Gatling, 분산락 최종 채택 포함) → AWS 배포 순서로 이어간다(decisions.md 13번).
+
+**일정 관련(2026-08-27 확정, 사용자 확인 완료)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 다 끝내는 것을 목표로 한다** — 원래 "4주차는 3주차 테스트 마무리만 하는 버퍼"로 설계돼 있었지만, 사용자가 3주차 안에 완결하고 싶다고 확정함. 4일(08-27~08-30) 안에 복습+카오스+부하+배포를 다 넣어야 해서 일정이 빠듯하다는 점을 사용자와 공유·확인함. **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐.
 
 ## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
 
@@ -109,12 +86,6 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 | 4주차 | 08-31 ~ 09-09 | 카오스 테스트·부하테스트 마무리, 결과 기반 간단한 리팩토링만. 새 기능/인프라 변경 없음 |
 
 **2026-08-16 (1주차 마지막 날) 점검에서 발견/확정된 사항**: decisions.md 13번 구현순서와 주차 일정을 대조한 결과, "이벤트/구역/좌석 등록 API"와 "ADMIN 승인 API"가 설계(api-design.md 2·6번)는 되어 있었지만 구현순서/주차 일정 어디에도 명시적으로 안 들어가 있던 걸 발견 — ADMIN 승인이 없으면 ORGANIZER가 로그인을 못해 이벤트 등록 자체가 막히고, 이벤트/좌석 데이터가 없으면 2주차 좌석 상태 모델 작업을 검증할 수 없어 순서상 1주차(인증/인가 다음)에 추가함(사용자 확인 완료). 예약 취소 API는 별도 항목 없이 3주차 결제 연동에 포함(Saga 보상 로직 재사용). 이 참에 미확정이었던 **Refresh Token 저장 방식도 확정**: httpOnly Cookie로 전달 + Redis(`refresh_token:{accountId}`)에 저장해 로그아웃/재로그인 시 무효화, 다중 기기 로그인은 미지원(계정당 1개 세션). decisions.md 3번, redis-design.md 9번, db-schema.md, api-design.md 전부 반영 완료.
-
-**1주차 마무리**: 인증/인가·ADMIN 승인·이벤트/구역/좌석 등록·대기열·포트원 웹훅 스모크테스트까지 모두 완료. 2주차(좌석 상태 모델/홀드 TTL/Saga/분산락 벤치마크)로 진행.
-
-**2026-08-19 세션 마무리**: 2주차 4개 항목 중 3개(좌석 상태 모델, 홀드 TTL/만료 처리, Saga 상태머신) 완료. 남은 건 **분산락 벤치마크** 하나뿐 — 다음 세션에서 이어서 진행. 이 과정에서 나온 부수 결정 2건: (1) Redis 만료 처리를 Keyspace Notification 대신 `hold_schedule` 정렬 집합 방식으로 재설계, `docker-compose.yml` AOF/RDB도 문서 원안대로 끔. (2) 이벤트별 구매 한도(1인 1매/2매) 조직자 설정 기능은 이번 프로젝트 핵심(동시성 제어)과 무관한 CRUD성 기능이라 **보류 확정** — 필요해지면 3주차 후반에 짧게 추가(위 "여유 있을 때 아무 때나 결정 가능" 항목 참고), 4주차엔 넣지 않음.
-
-**2주차 마무리(2026-08-20)**: 좌석 상태 모델·홀드 TTL/만료 처리·Saga 상태머신·분산락 두 방식 구현까지 **코드는 전부 완료**. 다만 "분산락 최종 채택"(어느 방식을 쓸지 실제로 고르는 것)은 Gatling이 없어 3주차 부하테스트로 넘어간 채 열려있다 — 3주차 카오스/부하테스트 항목에서 이걸 닫아야 2주차 계획이 완전히 끝난다. 3주차(Kafka exactly-once/결제 연동/인프라·AWS 배포/카오스·부하테스트)로 진행.
 
 **2026-08-23**: 중간 보고서(`REPORT_DRAFT.md`, 제출 기한 2026-08-25) 작성 중 카오스(장애 주입) 테스트 도구를 **Pumba로 확정**(decisions.md 8번 반영) — Docker 컨테이너를 직접 대상으로 해 지금 쓰는 docker-compose(MySQL/Redis/Kafka)에 코드 수정 없이 바로 적용 가능하고, 컨테이너 kill/stop뿐 아니라 네트워크 지연·패킷 유실까지 다룰 수 있어 decisions.md 8번의 "일정 남으면 네트워크 파티션 확장" 시나리오와도 같은 도구로 이어진다. Toxiproxy(더 정교하지만 앱 연결 설정을 프록시 경유로 바꿔야 함)·수동 `docker stop`(가장 단순하지만 재현성·중간 상태 표현력이 떨어짐) 두 대안을 검토 후 선택(사용자 확인 완료). 실제 도입은 3주차 카오스 테스트 착수 시점.
 
@@ -142,6 +113,16 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 - **2026-08-27**: **Nginx 추가(로컬, 대기열 진입 API 앞단 Rate Limiting) — 코드 작성 및 자체 검증 완료, 커밋은 사용자가 직접 테스트 후 별도로 진행 예정.** `nginx/nginx.conf` + `docker-compose.yml`에 `nginx` 서비스 추가(포트 8081 → 컨테이너 80). decisions.md 4번 범위 그대로 — **대기열 진입 API(`POST /events/{id}/queue/entries`)만** `limit_req_zone`(5r/s, burst 10)으로 제한하고, 순번 폴링(GET .../me)이나 다른 API는 그대로 통과시킨다. 백엔드가 아직 컨테이너화되지 않아(Dockerfile 미착수) `host.docker.internal`로 호스트의 `gradlew bootRun` 프로세스를 그대로 가리킨다. rate/burst 수치는 다른 TTL류와 마찬가지로 placeholder — 3주차 Gatling 부하테스트에서 조정한다.
   - **검증(구현 중 직접 확인한 것)**: 대기열 진입 API에 연속 20회 요청 시 뒤쪽이 429로 거절되는 것 확인, 반면 이벤트 목록 조회(`GET /events`)와 순번 폴링(`GET .../queue/entries/me`)은 동일하게 연속 20회를 쏴도 전부 정상 응답(429 없음)인 것으로 스코프가 의도대로 좁게 걸렸는지 확인했다.
   - **다음으로 미룬 것**: 프론트 정적 파일을 Nginx가 서빙하는 것(AWS 배포 단계에서 진행, 지금은 Vite dev server 그대로), 사용자의 자체 테스트 및 커밋/푸시.
+
+- **2026-08-27**: **Prometheus + Grafana 추가(로컬, 카오스/부하테스트 관찰용) — 코드 작성 및 자체 검증 완료.** 사용자가 "그라파나·프로메테우스도 해야 하지 않냐"고 지적해 그제야 착수 — decisions.md 10번(CloudWatch 배제)과는 다른 결정이다: CloudWatch는 AWS 관리형 서비스라 뺀 것이고, Prometheus/Grafana는 우리가 직접 Docker로 띄우는 것이라 그 배제 이유에 안 걸린다. **classq(참고 프로젝트)가 부하테스트 때 쓴 방식을 참고**하되(구조만 참고, 코드는 우리 스택에 맞게 새로 작성 — CLAUDE.md 협업 규칙) 사용자 확인(AskUserQuestion)으로 범위를 정함: (1) 카오스/부하테스트 직전에 **로컬로만** 추가(AWS 배포에는 미포함), (2) classq와 동일하게 API 응답시간/에러율·Kafka Consumer lag·DB 커넥션 풀(HikariCP)을 지켜본다.
+  - **만든 것**: 백엔드에 `spring-boot-starter-actuator` + `micrometer-registry-prometheus` 추가, `management.endpoints.web.exposure.include=health,prometheus`로 `/actuator/prometheus` 개방. `prometheus/prometheus.yml`(1초 간격 스크랩, classq와 동일), `grafana/provisioning/datasources/prometheus.yml`(Prometheus 데이터소스 자동 등록). `docker-compose.yml`에 `prometheus`(9090)·`grafana`(3000) 서비스 추가, Nginx와 동일하게 `host.docker.internal`로 호스트의 `gradlew bootRun`을 가리킨다. Grafana는 `grafana_data` 볼륨을 붙여 카오스 테스트 중 타임라인에 남기는 annotation·패널 편집이 `docker compose down` 후에도 유지되게 했다(classq 참고).
+  - **exporter 없이 백엔드 하나만 스크랩해도 3개 항목이 전부 잡히는 것을 직접 확인**: `/actuator/prometheus` 응답에서 `hikaricp_connections_*`(커넥션 풀), `kafka_consumer_fetch_manager_records_lag_max`(Consumer lag), `http_server_requests_seconds_*`(API 응답시간/상태코드) 메트릭이 별도 exporter 설정 없이 자동으로 노출되는 것을 확인했다 — Spring Boot가 HikariCP와 Kafka 클라이언트를 Micrometer에 자동으로 바인딩해주기 때문(classq의 `docker/prometheus.yml`도 실제로 스크랩 대상이 앱 하나뿐이라 같은 구조임을 확인하고 그대로 따름).
+  - **버그 하나 발견해 수정**: `/actuator/prometheus`가 401을 반환했다 — `SecurityConfig`가 이 경로도 인증 대상으로 잡고 있었음. `.requestMatchers("/actuator/**").permitAll()` 추가로 해결(로컬 전용이라 인증 없이 열어둠 — 실배포 시엔 네트워크 레벨 차단이 더 표준적인 접근이라고 판단, decisions.md에 반영).
+  - **검증**: `curl localhost:9090/api/v1/targets` → `"health":"up"`으로 스크랩 성공 확인. `curl -u admin:admin localhost:3000/api/datasources` → Prometheus 데이터소스가 자동으로 등록된 것 확인(Grafana 기본 계정 admin/admin).
+  - **다음으로 미룬 것**: 실제 대시보드 패널 구성(카오스/부하테스트 시작 시점에 만드는 게 더 자연스러움 — provisioning 파일로 관리 예정).
+  - **2026-08-28 재검증 후 커밋**: 인프라를 전부 띄우고 `gradlew clean build`(테스트 17개 포함) 통과 확인, 앱 기동 후 `/actuator/prometheus`의 3개 지표(`hikaricp_connections`·`http_server_requests_seconds`·`kafka_consumer_*`)·Prometheus 타깃 `up`·Grafana→Prometheus 데이터소스 헬스체크 OK·Nginx 진입 API 20연타 시 뒤쪽 429까지 재확인. 이 과정에서 `grafana_data` 볼륨과 `GF_SECURITY_ADMIN_PASSWORD`를 추가(classq 정렬). Nginx는 2026-08-27 자체 검증 상태 그대로 함께 커밋.
+
+- **2026-08-27**: **일정 재확인 — 3주차 안에 카오스/부하테스트/AWS 배포까지 다 끝내기로 확정(사용자 확인 완료).** 원래 "4주차는 3주차 테스트 마무리 버퍼"로 설계돼 있었지만, 사용자가 4주차로 넘기지 않고 3주차(~08-30) 안에 완결하고 싶다고 확정함. 오늘 포함 4일(08-27~08-30) 안에 "1~3주차 흐름 복습 + 카오스 테스트 + 부하테스트(분산락 결정 포함) + AWS 배포"를 다 넣어야 해서 상당히 빠듯하다는 점을 사용자와 공유·확인했다(제안한 완화책: 복습은 별도 시간 잡지 말고 필요할 때 문서를 짧게 참고하는 식으로, 카오스 시나리오는 decisions.md 8번 최소 범위인 Redis/Kafka 2개만). **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐, IAM 키/CLI 설정 여부는 아직 미확인. **다음 세션은 카오스 테스트(Pumba)부터 시작.**
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
