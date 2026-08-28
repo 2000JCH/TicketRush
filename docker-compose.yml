@@ -112,9 +112,11 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       # 카오스 테스트 중 타임라인에 남기는 주석(annotation)·패널 편집이 docker compose down 후에도
-      # 남도록 Grafana 상태를 볼륨에 둔다. 대시보드 자체는 이후 provisioning 파일로 관리한다.
+      # 남도록 Grafana 상태를 볼륨에 둔다.
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # 대시보드는 provisioning 파일로 관리한다(grafana/dashboards/ticketrush.json).
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 

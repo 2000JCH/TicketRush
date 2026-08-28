@@ -1,0 +1,102 @@
+{
+  "uid": "ticketrush-load",
+  "title": "TicketRush — 부하/카오스 관찰",
+  "tags": ["ticketrush"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "uri",
+        "type": "query",
+        "label": "URI",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(http_server_requests_seconds_count{job=\"ticketrush\"}, uri)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "API 응답시간 P50 / P95 / P99  (uri=$uri)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "멘토 피드백(2026-08-28): 처리량이 아니라 '가장 느렸던 사람들'이 이탈한다 — P99를 본다. decisions.md 2번.",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "P50", "legendFormat": "P50", "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval])))" },
+        { "refId": "P95", "legendFormat": "P95", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval])))" },
+        { "refId": "P99", "legendFormat": "P99", "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval])))" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "요청/에러율  (상태코드별, uri=$uri)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "락 실패(409)·5xx를 정상 트래픽과 분리해서 본다. 실패 방식(즉시/대기 후)은 P99 패널과 대조.",
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "stacking": { "mode": "normal" } } },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "^(4|5).*" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{status}}", "expr": "sum by (status) (rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval]))" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Kafka Consumer Lag",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "카오스 시나리오 2(Kafka 브로커 다운): 브로커 복구 후 밀린 이벤트가 처리되며 lag이 0으로 수렴하는지 본다. decisions.md 8번.",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{client_id}}", "expr": "kafka_consumer_fetch_manager_records_lag_max{job=\"ticketrush\"}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "HikariCP 커넥션 풀",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "pending가 0을 넘으면 DB 커넥션 대기 = 병목. DB 비관적 락 전략에서 특히 주시.",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "pending" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "active", "expr": "hikaricp_connections_active{job=\"ticketrush\"}" },
+        { "refId": "B", "legendFormat": "pending", "expr": "hikaricp_connections_pending{job=\"ticketrush\"}" },
+        { "refId": "C", "legendFormat": "idle", "expr": "hikaricp_connections_idle{job=\"ticketrush\"}" },
+        { "refId": "D", "legendFormat": "max", "expr": "hikaricp_connections_max{job=\"ticketrush\"}" }
+      ]
+    }
+  ]
+}
