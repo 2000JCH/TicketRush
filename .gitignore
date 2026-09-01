@@ -42,3 +42,6 @@ out/
 
 ### Private docs (not for GitHub) ###
 .claude/portfolio.md
+
+### Generated load-test fixtures (scripts/seed-load-test.ps1 output) ###
+**/src/gatling/resources/data/buyers.csv

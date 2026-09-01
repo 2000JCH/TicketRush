@@ -4,11 +4,13 @@
   properties correctly (Windows PowerShell mangles inline `-Dfoo.bar=baz` args).
 
 .EXAMPLE
-  # chaos test traffic
-  powershell -File scripts\run-gatling.ps1 -EventId 158 -SectionId 277 -Users 150 -RampSeconds 30
+  # chaos test traffic — burst (70% at once) + trickle over RampSeconds, so traffic keeps
+  # flowing past the failure-injection point instead of finishing all at once
+  powershell -File scripts\run-gatling.ps1 -EventId 158 -SectionId 277 -Users 150 -RampSeconds 40
 
-  # distributed-lock benchmark (all group holds)
-  powershell -File scripts\run-gatling.ps1 -EventId 158 -SectionId 277 -Users 300 -RampSeconds 60 -GroupHoldRatio 1.0
+  # distributed-lock benchmark (all group holds, everyone hits queue-entry at the same instant
+  # like a real ticket-opening rush — this is what actually creates lock contention)
+  powershell -File scripts\run-gatling.ps1 -EventId 158 -SectionId 277 -Users 300 -GroupHoldRatio 1.0 -InjectMode atonce
 #>
 param(
     [Parameter(Mandatory = $true)][long]$EventId,
@@ -16,7 +18,9 @@ param(
     [string]$BaseUrl = "http://localhost:8080",
     [int]$Users = 150,
     [int]$RampSeconds = 30,
-    [double]$GroupHoldRatio = 0.3
+    [double]$GroupHoldRatio = 0.3,
+    [ValidateSet("chaos", "atonce")][string]$InjectMode = "chaos",
+    [double]$BurstRatio = 0.7
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +35,8 @@ $gradleArgs = @(
     "-Dusers=$Users",
     "-Dramp.seconds=$RampSeconds",
     "-Dgroup.hold.ratio=$GroupHoldRatio",
+    "-Dinject.mode=$InjectMode",
+    "-Dburst.ratio=$BurstRatio",
     "--console=plain"
 )
 
