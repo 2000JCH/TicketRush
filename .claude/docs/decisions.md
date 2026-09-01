@@ -47,6 +47,7 @@
   - **판정**: 정합성을 만족하는 방식들 사이에서 처리량·P99가 모두 20% 이내로 비슷하면 "유의미한 차이 없음"으로 보고 추가 인프라가 필요 없는 DB 락을 채택(운영 단순성 우선)한다. 처리량과 P99가 서로 다른 방향을 가리키면(예: DB 락이 처리량은 높은데 P99가 크게 나쁨) P99를 우선한다 — 폭주 상황에서 상위 1%가 몇 초씩 기다리는 쪽은 채택하지 않는다.
   - **락 실패 시 응답 형태도 관찰 항목이다(2026-08-28 보강)**: 락을 못 잡았을 때 사용자에게 나가는 게 (a) 즉시 실패인지 (b) 몇 초 기다렸다 실패인지에 따라, 에러율 숫자가 비슷해도 실제 경험이 다르다. 두 구현의 실패 방식을 같은 수준으로 맞춰야 공정한 비교가 된다 — Redisson은 `tryLock(waitMillis, ...)`로 대기 상한이 명확하고 전용 에러(`GROUP_HOLD_LOCK_TIMEOUT`)를 내지만, DB 비관적 락은 현재 lock timeout 미지정이라 MySQL 기본 `innodb_lock_wait_timeout`(50초)까지 블로킹 후 일반 500으로 샌다. **벤치마크 착수 전에 DB 락에도 Redisson과 같은 수준의 lock timeout을 걸고 실패를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑하는 선행 작업이 필요하다**(progress.md 추적).
   - 락 획득 실패/타임아웃 에러율이 한쪽에서 뚜렷이(5%p 이상) 높으면 감점 요인으로 반영한다.
+  - **투입 방식은 완전 동시(`atOnceUsers`)로 한다(2026-09-01 확정)**: 실제 티켓 오픈 순간은 사용자가 몇십 초에 걸쳐 서서히 들어오는 게 아니라 오픈 시각에 다같이 클릭하는 순간 폭주다 — 서서히 투입(`rampUsers`)하면 좌석 경합 자체가 약해져 두 락 방식의 차이가 흐려진다. 회원가입/로그인도 벤치마크 측정 구간에서 뺐다(`seed-load-test.ps1`가 미리 끝내고 `buyers.csv`로 accessToken을 공급) — 그대로 두면 BCrypt 지연이 락 경합 신호와 섞여 어느 쪽이 원인인지 구분이 안 된다. 상세는 `test-plan.md` 0·3번.
 - Zookeeper는 후보에서 제외
   → ephemeral znode + ZAB 합의로 강한 일관성을 제공하지만, 3~5노드 앙상블 운영이 필요해 1개월 솔로 프로젝트에서 비용 대비 이득이 낮다고 판단.
 
@@ -108,6 +109,7 @@
 - 범위: Redis 장애, Kafka 브로커 다운 2개 시나리오로 한정 (일정 남으면 네트워크 파티션 확장)
 - 부하테스트(Gatling)로 처리량 검증 + 장애 주입 테스트로 정합성이 장애 상황에서도 유지되는지 검증 — "빠른가"뿐 아니라 "장애에도 안 깨지는가"까지 실측 증명하는 것이 이 프로젝트의 핵심 목표
 - **카오스 테스트 중 부하 발생도 Gatling으로 한다(2026-08-28 확정)**: 장애 상황에서 정합성을 검증하려면 장애 주입 시점에 요청이 계속 흐르고 있어야 한다. 이때 쓰는 트래픽 발생기를 별도 스크립트로 만들지 않고, 다음 단계(부하테스트·분산락 벤치마크)에서 어차피 필요한 Gatling 시나리오를 먼저 작성해 카오스 테스트에도 그대로 재사용한다. 카오스 단계에서는 처리량 자체가 목표가 아니라 "장애 중에도 오버셀 0·결제 무손실"을 보는 것이므로, 중간 규모(예: 동시 100~200)로 돌린다.
+- **카오스 테스트의 투입 방식은 "버스트+지속 트리클" 혼합이다(2026-09-01 확정)**: 실제 티켓 오픈처럼 사용자 대부분(기본 70%)은 대기열 진입 순간 완전 동시로 몰리고, 나머지는 장애 주입 구간(+20초 이후)까지 계속 새로 유입되게 한다 — 순수 버스트만 쓰면 장애가 실제로 터지는 시점엔 이미 대부분 시나리오를 끝냈거나 끝내가는 중이라 트래픽이 끊길 수 있기 때문(분산락 벤치마크의 완전 동시와 목적이 다름 — 위 2번 참고). 여기도 회원가입/로그인은 `buyers.csv` 사전 로그인으로 측정 구간에서 뺀다. 상세는 `test-plan.md` 0-1·2번.
 - Redis 장애 시나리오의 정상 동작 기준은 1번 참고.
 - Kafka 브로커 다운 시나리오의 정상 동작 기준: Kafka가 다운돼도 결제 확정(DB 트랜잭션 + outbox insert)은 정상적으로 완료되고 사용자 응답은 실패하지 않는다. 다만 Debezium이 outbox_events를 Kafka로 발행하지 못해 정산/알림 등 후속 이벤트는 브로커 복구 후 지연 처리되며, 그 사이 outbox_events 테이블에 미발행 레코드가 쌓일 뿐 유실은 없다. (이 기준은 수분~수십 분 내 복구되는 일시적 장애를 가정하며, MySQL binlog retention을 넘는 장기 장애는 범위 밖이다.)
 
@@ -128,6 +130,7 @@
   → Redis와 Kafka(Kafka Connect+Debezium 포함)도 로컬 `docker-compose.yml`과 동일하게 **EC2 위에서 Docker Compose로 그대로 운영**한다 — 별도 관리형 서비스로 옮기지 않음. MySQL만 RDS(관리형)를 쓰는 이유는 이미 원래 계획(1주차 이전)에 있던 결정이라 그대로 유지.
   → CloudWatch도 이번엔 별도로 구성하지 않는다(로그/모니터링은 범위 밖).
 - **EC2 인스턴스 계열: m계열(범용) 방향 — classq의 c계열과 다른 이유(2026-08-28, 상세는 `aws-spec.md`)**: classq는 앱 서버가 전용 인스턴스(EKS)라 "앱만" 놓고 CPU 위주로 `c6i.xlarge`를 골랐다. TicketRush는 EC2 **한 대**에 Spring Boot + Redis + Kafka(KRaft) + Kafka Connect(Debezium) + Nginx를 전부 얹으므로(위 결정), JVM 3개 + Redis + Kafka 페이지 캐시 + OS를 한 박스가 감당해야 한다 — RAM이 CPU만큼 병목이라 vCPU:RAM이 1:2인 c계열(c6i.xlarge=4vCPU/8GiB)은 빠듯하고, 1:4인 m계열이 맞다. t계열은 부하/폭주 테스트가 지속 CPU 부하라 크레딧 고갈로 제외(classq와 동일한 이유). **잠정값 `m6i.xlarge`(4 vCPU / 16 GiB)**, 정확한 크기는 로컬 Gatling 부하테스트 실측 후 classq와 같은 방식(로컬 P95/처리량 → AWS 예측표 → SLO)으로 `aws-spec.md`에서 확정한다.
+  - **이 "정확한 크기 확정"을 무제한 로컬이 아니라 `docker-compose.rehearsal.yml` 리허설 환경에서 한다(2026-09-01 확정)**: 로컬 PC를 제한 없이 쓰면 병목이 CPU인지 RAM인지가 "이 PC 스펙" 문제로 가려진다 — 그리고 그 판단을 AWS에 실제로 올린 뒤에야 하게 되면, 못 버티는 걸 발견할 때마다 요금이 나가는 상태로 원인 분석·재배포를 반복해야 한다(사용자 문제 제기). 그래서 로컬을 먼저 이 잠정 스펙(app 2vCPU/6GiB + kafka 1/4 + kafka-connect 0.5/2 + redis 0.25/1 + nginx 0.25/1 = 4vCPU/16GiB 합)만큼 제한해 한계 테스트를 돌리고, Grafana로 무엇이 먼저 포화되는지(CPU? 메모리? HikariCP 대기? Kafka lag?) 봐서 계열·크기를 확정한 다음에 실제로 AWS에 올린다. 상세는 `test-plan.md` 0-1번.
 - **RDS(MySQL) 인스턴스: 분산락 벤치마크(2번) 결과에 따라 결정(2026-08-28)**: Redisson RLock을 채택하면 RDS는 `reservation`/`outbox_events` INSERT만 받으므로 `db.m6i.large`(2/8)로 충분하고, DB 비관적 락을 채택하면 `SELECT ... FOR UPDATE` 경합 부하가 RDS로 몰리므로 InnoDB 버퍼 풀에 여유가 있는 `db.r6i.large`(2/16)가 필요하다. 잠정값은 벤치마크 전까지 `db.m6i.large`로 두고 `aws-spec.md`에 함께 기록한다.
 - **모니터링(로컬 한정): Prometheus + Grafana는 추가한다(2026-08-27, 사용자 확인 완료) — 위 CloudWatch 배제와는 별개 결정이다.** CloudWatch는 AWS가 관리해주는 서비스라 뺐지만, Prometheus/Grafana는 우리가 직접 Docker Compose로 띄우는 것이라 "관리형 서비스 배제" 이유가 적용되지 않는다. 카오스/부하테스트(Gatling·Pumba) 결과를 실시간으로 관찰하고 portfolio.md의 성능 수치 근거로 남기기 위한 것 — classq(참고 프로젝트)가 부하테스트 때 쓴 구조를 참고했다(구조만 참고, 실제 설정은 우리 스택에 맞게 새로 작성). **범위는 로컬만**(AWS 배포에는 포함하지 않음), **지켜보는 항목은 API 응답시간/에러율·Kafka Consumer lag·DB 커넥션 풀(HikariCP)** 3가지로 classq와 동일하게 맞췄다. `spring-boot-starter-actuator`+`micrometer-registry-prometheus`만 추가하면 이 3가지가 별도 exporter 없이 `/actuator/prometheus`에서 전부 잡힌다(Spring Boot가 HikariCP/Kafka 클라이언트를 Micrometer에 자동 바인딩) — 실제로 확인 완료(progress.md 참고). `/actuator/**`는 로컬 전용으로 인증 없이 열어뒀다(`SecurityConfig`).
 

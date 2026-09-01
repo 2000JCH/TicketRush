@@ -61,6 +61,37 @@
   - **자동 테스트로 검증**: `SeatServiceGroupHoldTest`(기본 프로퍼티=Redisson, 5개 케이스: 그룹 홀드 성공/중복 좌석 거절/3개 이상 거절/한 좌석 선점 시 롤백/동시 요청 8개 중 1개만 성공)와 `SeatServiceGroupHoldDbLockTest`(`@SpringBootTest(properties = "group-hold.lock-strategy=db")`로 별도 스프링 컨텍스트, 같은 핵심 시나리오 3개 재검증) — 두 파일 다 오버셀 0건을 동시성 테스트(`ExecutorService` 8스레드가 같은 좌석 쌍을 동시에 시도)로 직접 확인했다. 전체 테스트(`ReservationServiceTest` 8 + 이 두 파일 8 + 기존 1)까지 `gradlew.bat test` 17개 전부 통과.
   - **다음 단계로 미룬 것**: Gatling 시나리오 작성, 실측 처리량/지연/에러율 비교, 최종 락 방식 채택(decisions.md 2번) — 전부 3주차 부하 테스트. `portfolio.md`의 "분산락 벤치마크" 소재(192번째 줄 표)는 그 실측이 끝난 뒤에 채운다.
 
+- **2026-09-01**: **Phase 2 실행 전 테스트 설계 보완 3건 — 실제 실행은 아직 시작 전.**
+  1. **부하 시나리오에서 회원가입/로그인을 뺐다.** `GoldenPathSimulation`이 매 VU마다 signup+login을
+     하던 걸 제거하고, `seed-load-test.ps1`(`-BuyerCount` 신규 파라미터)이 BUYER 계정을 미리
+     가입·로그인까지 끝내 `src/gatling/resources/data/buyers.csv`(email,password,accessToken, 순환
+     feeder)로 공급하도록 바꿨다. 실제 티켓팅처럼 "오픈 훨씬 전에 로그인 완료" 상태를 가정해, 로그인
+     BCrypt 비용이 분산락 벤치마크의 락 경합 신호·한계 테스트의 병목 판별을 가리는 걸 막기 위함(전체
+     테스트에 적용, 사용자 확인 완료). buyers.csv는 gitignore 대상.
+  2. **대기열 진입 투입 방식을 시나리오별로 분리했다(`inject.mode`).** 실제 티켓팅은 오픈 시각에
+     다같이 클릭하는 순간 폭주지 몇십 초 걸친 점진 유입이 아니라는 지적(사용자)을 반영. `chaos`(기본,
+     ①②용): 70%(`burst.ratio`)는 완전 동시 투입 + 나머지는 트리클 유입(장애 주입 시점 이후에도
+     트래픽이 이어지게). `atonce`(③ 분산락 벤치마크용): 전원 완전 동시 — 좌석 경합을 가장 강하게
+     재현. `run-gatling.ps1`에 `-InjectMode`/`-BurstRatio` 추가.
+  3. **AWS 배포 전 로컬 리허설 스택을 만들었다(`docker-compose.rehearsal.yml` + `ticketrush-backend/Dockerfile` 신규).**
+     "로컬에서 무제한으로 돌리면 노트북 성능만 재는 것이고, AWS에 올렸다가 못 버티면 요금 나가는 중에
+     고쳐야 한다"는 사용자 지적으로 시작 — AWS EC2(`m6i.xlarge`, 4vCPU/16GiB)+RDS(`db.m6i.large`,
+     2vCPU/8GiB) 스펙을 로컬에 그대로 흉내낸다. 평소 개발용 `docker-compose.yml`은 전혀 안 건드리는
+     별도 오버레이 파일 — 리허설에서만 앱도 Dockerfile로 빌드해 컨테이너로 띄운다(평소엔 여전히
+     `gradlew bootRun`). EC2 예산은 app(2vCPU/6g)+kafka(1/4g)+kafka-connect(0.5/2g)+redis(0.25/1g)+
+     nginx(0.25/1g)로 분배, RDS 예산은 mysql이 별도(분산락 벤치마크가 DB 락을 채택하면 `db.r6i.large`
+     16g로 재조정). Nginx는 `nginx.rehearsal.conf`(신규, upstream이 `host.docker.internal` 대신
+     컨테이너 서비스명 `app`)를 쓴다 — Compose 파일 병합 시 volumes 리스트가 누적(append)되는 문제를
+     `!override` YAML 태그로 해결. **빌드→기동→헬스체크까지 전부 실제 검증 완료**: 앱 컨테이너
+     빌드 성공, mysql/redis/kafka/kafka-connect/app 순서로 기동해 앱이 컨테이너 네트워크 안에서
+     `mysql`/`redis`/`kafka:29092` 서비스명으로 정상 연결, `docker inspect`로 리소스 제한(app 2
+     CPU/6GiB, mysql 2 CPU/8GiB) 실제 적용 확인, Nginx(8081) 경유 응답도 정상. 검증 후 컨테이너는
+     내려둠. Prometheus/Grafana는 AWS EC2 박스에 포함되는 구성요소가 아니라 제한 대상에서 제외.
+     `test-plan.md` 0-1번(신규)·4번(한계 테스트는 이 리허설 스택으로 진행)·3번(분산락 명령 예시에
+     `-InjectMode atonce`, `-BuyerCount` 반영)에 문서화 완료.
+  - **다음**: 이 세 가지 보완을 반영한 상태로 Phase 2(①②카오스 → ③분산락 벤치마크 → ④한계 테스트,
+    ④는 리허설 스택으로) 실행 시작. 아직 실제 테스트는 하나도 안 돌림.
+
 ## 다음 작업
 
 **진행 순서: 카오스 테스트 → 부하 테스트(분산락 최종 채택 포함) → AWS 배포**(decisions.md 13번). 카오스/부하 둘 다 로컬 Docker Compose 대상.
@@ -85,7 +116,7 @@
 - `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
 - 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
 
-**Phase 2 (다음, 사용자 신호 대기) — 실행:** test-plan.md 2번 카오스 2개 → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트. 절차·합격 기준은 전부 test-plan.md에 있음.
+**Phase 2 (진행 중, 2026-09-01 착수) — 실행:** test-plan.md 2번 카오스 2개 → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음. 오늘은 ①번(Redis 다운)부터 시작.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 

@@ -20,11 +20,36 @@
 
 | 항목 | 값 |
 |---|---|
-| 로컬 | Windows PC 1대 + Docker Compose (MySQL / Redis / Kafka(KRaft) / Kafka Connect / Nginx / Prometheus / Grafana), 백엔드는 호스트에서 `gradlew bootRun` |
+| 로컬 (평소) | Windows PC 1대 + Docker Compose (MySQL / Redis / Kafka(KRaft) / Kafka Connect / Nginx / Prometheus / Grafana), 백엔드는 호스트에서 `gradlew bootRun`, 리소스 제한 없음 |
+| 로컬 (리허설) | 아래 0-1번 — AWS 스펙만큼 CPU/메모리를 미리 제한해서 로컬에서 먼저 재현 |
 | AWS | EC2 `m6i.xlarge`(잠정) + RDS(MySQL). 카오스는 로컬만, AWS는 부하 테스트만 재측정 (decisions.md 10번) |
-| 부하 도구 | Gatling (`io.gatling.gradle` 3.15.1.3), `GoldenPathSimulation` |
+| 부하 도구 | Gatling (`io.gatling.gradle` 3.15.1.3), `GoldenPathSimulation`. BUYER 계정은 `seed-load-test.ps1`가 미리 가입·로그인까지 끝내 `buyers.csv`로 공급(측정 구간에서 signup/login 제외) |
 | 장애 주입 | Pumba (`gaiaadm/pumba:0.11.6`), `scripts/chaos-{redis,kafka}.ps1` |
 | 관찰 | Grafana 대시보드 `ticketrush-load` (응답시간 P50/P95/P99 · 상태코드별 요청/에러율 · Kafka Consumer lag · HikariCP) |
+
+### 0-1. 로컬 리허설 (AWS 스펙 제한, `docker-compose.rehearsal.yml`)
+
+AWS는 EC2 한 대(4 vCPU/16 GiB)에 돈을 태우기 전에, 로컬 PC를 그 스펙만큼 미리 제한해서 같은 조건으로
+먼저 돌려본다 — 특히 **4번 한계 테스트**는 결과가 "노트북 성능"이 아니라 "AWS에서 몇 명까지 버틸지"에
+가까워야 의미가 있고, AWS에 올린 뒤에 한계가 로컬보다 훨씬 낮게 나오면 요금이 나가는 상태에서 원인
+분석·재배포를 반복해야 한다(2026-09-01 확정, 사용자 문제 제기).
+
+- 평소 개발(`docker-compose.yml` 단독)에는 전혀 영향 없음 — 리허설은 완전히 별도 오버레이 파일.
+- 리허설에서는 앱도 `ticketrush-backend/Dockerfile`로 빌드해 컨테이너로 띄운다(평소엔 `gradlew bootRun`).
+- 예산 분배: EC2 몫(4 vCPU/16 GiB, `aws-spec.md` B-1)을 app(2/6g)+kafka(1/4g)+kafka-connect(0.5/2g)+
+  redis(0.25/1g)+nginx(0.25/1g)가 나눠 쓰고, RDS 몫(2 vCPU/8 GiB, `aws-spec.md` B-2 db.m6i.large
+  기준)은 mysql이 별도로 쓴다 — 실제로도 RDS는 EC2와 분리된 컴퓨트라 예산을 안 나누기 때문. 분산락
+  벤치마크에서 DB 락이 채택되면 RDS 후보가 `db.r6i.large`(16 GiB)로 바뀌므로 그때 mysql의
+  `mem_limit`도 16g로 올려 재확인한다. Prometheus/Grafana는 관찰 도구일 뿐 AWS EC2 박스에 포함되는
+  구성요소가 아니라 제한 대상에서 뺐다.
+- 실행:
+  ```powershell
+  docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml up -d --build
+  powershell -File scripts\register-outbox-connector.ps1   # 컨테이너 새로 뜰 때마다 재등록 필요
+  ```
+  Gatling은 `-DbaseUrl=http://localhost:8081`(Nginx 경유)로 실제 트래픽 경로와 동일하게 실행한다.
+- 빌드·기동·헬스체크(app 2 vCPU/6 GiB, mysql 2 vCPU/8 GiB로 제한 적용 확인 + Nginx 경유 응답)까지
+  검증 완료(2026-09-01).
 
 ---
 
@@ -144,16 +169,21 @@ decisions.md 2번의 채택 기준을 실제 숫자에 적용해 **Redisson RLoc
 좌석 풀을 작게 잡아 경합을 만든다.
 
 ```powershell
-powershell -File scripts/seed-load-test.ps1 -Rows 5 -SeatsPerRow 8   # 40석
+powershell -File scripts/seed-load-test.ps1 -Rows 5 -SeatsPerRow 8 -BuyerCount 300   # 40석 + BUYER 300명 사전 로그인
 
 # (A) Redisson
 #   application.properties group-hold.lock-strategy=redis (기본) 로 백엔드 기동
-powershell -File scripts/run-gatling.ps1 -EventId <idA> -SectionId <sid> -Users 300 -RampSeconds 60 -GroupHoldRatio 1.0
+powershell -File scripts/run-gatling.ps1 -EventId <idA> -SectionId <sid> -Users 300 -GroupHoldRatio 1.0 -InjectMode atonce
 
 # (B) DB 비관적 락  — 새 이벤트로 (좌석 상태 초기화)
 #   GROUP_HOLD_LOCK_STRATEGY=db 로 백엔드 재기동
-powershell -File scripts/run-gatling.ps1 -EventId <idB> -SectionId <sid> -Users 300 -RampSeconds 60 -GroupHoldRatio 1.0
+powershell -File scripts/run-gatling.ps1 -EventId <idB> -SectionId <sid> -Users 300 -GroupHoldRatio 1.0 -InjectMode atonce
 ```
+
+`-InjectMode atonce`로 300명 전원을 완전 동시(같은 시각) 투입한다 — 실제 티켓 오픈 순간의 "동시 클릭"을
+가장 가깝게 재현해야 락 경합 신호가 제대로 드러난다(2026-09-01 확정, ramp로 서서히 투입하면 경합이
+약해져 두 락 방식 차이가 흐려짐). `-BuyerCount`는 이번 `-Users`(300)보다 크거나 같아야 계정이
+재사용되지 않는다.
 
 > **조정 여지**: 로그인 BCrypt가 락 경합 신호를 가리면, `seed-load-test.ps1`에 BUYER 계정 풀을 미리
 > 만들어 Gatling이 재사용하도록 바꾼다(가입/로그인을 매 VU마다 하지 않음).
@@ -176,6 +206,10 @@ powershell -File scripts/run-gatling.ps1 -EventId <idB> -SectionId <sid> -Users 
 ---
 
 ## 4. 한계 테스트 (동시 몇 명까지 버티나)
+
+> **0-1번 리허설 스택으로 진행한다.** 평소 로컬(무제한)로 돌리면 "이 PC가 몇 명 버티나"만 재는
+> 것이라 AWS 배포 판단에 못 쓴다 — `docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml
+> up -d --build` 로 띄우고 baseUrl은 `http://localhost:8081`(Nginx 경유).
 
 2번·3번은 고정 부하다. 이 테스트는 **부러질 때까지 밀어서 한계 동시 사용자 수를 찾는다** — "우리 시스템은
 동시 N명까지 버틴다"는 문장이 포트폴리오의 핵심 수치가 된다.

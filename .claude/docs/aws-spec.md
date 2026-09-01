@@ -98,6 +98,11 @@
 | EC2 (Boot+Redis+Kafka+Connect+Nginx) | `m6i.xlarge` | 4 | 16 GiB | 로컬 부하테스트에서 병목축(CPU/RAM) 확인 |
 | RDS (MySQL) | `db.m6i.large` | 2 | 8 GiB | 분산락 벤치마크(decisions.md 2번) 결과. DB 락이면 `db.r6i.large` |
 
+> **"로컬 부하테스트에서 병목축 확인"은 무제한 로컬이 아니라 `docker-compose.rehearsal.yml`
+> (2026-09-01 신규)로 진행한다** — 위 표의 예산(EC2 4vCPU/16GiB, RDS 2vCPU/8GiB)을 그대로 컨테이너
+> 리소스 제한으로 걸어서, 4번 한계 테스트를 이 조건에서 돌리고 Grafana로 CPU/RAM 중 무엇이 먼저
+> 포화되는지 관찰해 계열·크기를 확정한다(decisions.md 10번, `test-plan.md` 0-1·4번).
+
 ---
 
 ## D. AWS 스펙별 성능 예측 → 실측
