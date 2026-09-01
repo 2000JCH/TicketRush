@@ -1,0 +1,64 @@
+# AWS EC2(m6i.xlarge, 4 vCPU/16 GiB, aws-spec.md B-1) + RDS(db.m6i.large, 2 vCPU/8 GiB, aws-spec.md
+# B-2) 스펙을 로컬에서 흉내내는 리허설 오버레이. 평소 개발(docker-compose.yml 단독)에는 영향 없음 —
+# 부하 테스트 4번(한계 테스트) 전, AWS에 실제로 돈을 태우기 전에 같은 리소스 예산으로 먼저 재현해
+# "노트북 성능"이 아니라 "EC2 성능"에 가까운 숫자로 한계치를 찾기 위함.
+#
+# 사용법:
+#   docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml up -d --build
+#   (평소처럼 gradlew bootRun을 쓰지 않는다 — app이 여기서 컨테이너로 함께 뜬다)
+#   powershell -File scripts\register-outbox-connector.ps1   (컨테이너 재기동마다 새로 등록 필요)
+#   Gatling은 -DbaseUrl=http://localhost:8081 (nginx 경유, 실제 트래픽 경로와 동일하게)
+#
+# EC2 예산(4 vCPU / 16 GiB)을 app+redis+kafka+kafka-connect+nginx가 나눠 쓰고, RDS 예산은 mysql이
+# 별도로 쓴다 — 실제로도 RDS는 EC2와 물리적으로 분리된 컴퓨트라 같은 예산을 나누지 않기 때문.
+# 분산락 벤치마크에서 DB 락이 채택되면 RDS는 db.r6i.large(2 vCPU/16 GiB)로 올라간다(aws-spec.md
+# B-2) — 그 경우 mem_limit을 16g로 바꿔서 재리허설한다.
+
+services:
+  mysql:
+    cpus: 2.0
+    mem_limit: 8g
+
+  redis:
+    cpus: 0.25
+    mem_limit: 1g
+
+  kafka:
+    cpus: 1.0
+    mem_limit: 4g
+
+  kafka-connect:
+    cpus: 0.5
+    mem_limit: 2g
+
+  nginx:
+    volumes: !override
+      - ./nginx/nginx.rehearsal.conf:/etc/nginx/nginx.conf:ro
+    cpus: 0.25
+    mem_limit: 1g
+
+  # 평소엔 gradlew bootRun으로 호스트에서 돌리는 앱을, 리허설에서만 AWS와 동일하게 컨테이너로 띄운다.
+  app:
+    build:
+      context: ./ticketrush-backend
+    container_name: ticketrush-app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+    env_file:
+      - ./ticketrush-backend/.env
+    environment:
+      # .env/application.properties 기본값은 전부 localhost 기준(호스트 bootRun용) — 컨테이너 네트워크
+      # 안에서는 서비스명으로 덮어써야 한다. 나머지 값(JWT_SECRET 등)은 env_file의 .env를 그대로 쓴다.
+      DB_URL: jdbc:mysql://mysql:3306/ticketrush?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&rewriteBatchedStatements=true
+      REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CONNECT_REST_URL: http://kafka-connect:8083
+    ports:
+      - "8080:8080"
+    cpus: 2.0
+    mem_limit: 6g
