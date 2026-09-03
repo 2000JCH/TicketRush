@@ -99,7 +99,13 @@
   - **실행**: 클린 스택(`docker compose down -v`) + 새 이벤트(400석) + BUYER 400명. **총 390 VU** — 버스트 105(오픈 순간 동시) + 트리클 45(40초 분산) + 꼬리 240(초당 2명 × 120초, 복구 관찰용). 좌석 홀드 트래픽이 흐를 때 `docker stop ticketrush-redis` → 61초 → `docker start`. (Pumba `stop --restart`는 이 환경에서 "no containers to stop"으로 불안정 → docker 직접.)
   - **결과**: **오버셀 0** / Redis 복구 → seat_status 재구성 완료 **~4초** / rebuild **1회** + 락 경합 요청 `503` 3건 / **최대 응답시간 2,035ms**(타임아웃 2초 cap 확인 — 이전엔 60초 매달림). KO 1,187건 중 79%가 `404 QUEUE_ENTRY_NOT_FOUND`(Redis가 대기열 Sorted Set도 잃음 — decisions.md 1번 "알려진 한계"), 나머지는 장애 중 타임아웃 500·rebuild 가드 503. 진짜 서버 버그성 실패 0.
   - **다음 후보(안 고침)**: 장애 중 Redis 타임아웃을 일반 500이 아니라 503으로 매핑.
-  - **다음**: ②Kafka 다운 → ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).
+
+- **2026-09-03**: **카오스 A-2 (Kafka 브로커 다운) 실행 완료 — 전부 통과. (`test-results.md` 2번, 스크린샷 `.claude/screenshots/tests/a2-kafka-down/`)**
+  - **선행: `scripts/fail-payments.ps1` 신규** — Gatling 골든패스는 결제 요청까지만 하므로 outbox→Kafka 경로가 안 돌아간다. 이 스크립트가 주기적으로 `PAYMENT_REQUESTED` 예약을 조회해 일부에 서명된(`PORTONE_WEBHOOK_SECRET`, Standard Webhooks HMAC-SHA256) `Transaction.Failed` 웹훅을 쏜다 → `markPaymentFailed`가 `outbox_events` INSERT. `test-plan.md` A-2 검증 SQL도 수정(원래 `SELECT status FROM outbox_events`인데 발행 상태 컬럼이 없음 — INSERT 전용).
+  - **실행**: 클린 스택 + 새 이벤트(400석) + BUYER 400명. 총 390 VU 골든패스 + `fail-payments.ps1`(FailRatio 0.8) 병행. 좌석/웹훅 트래픽이 흐를 때 `docker stop ticketrush-kafka` → 91초 → `docker start` → `docker compose restart kafka-connect` + 커넥터 재등록.
+  - **결과**: **장애 중 `payment-request` 5xx 0건 / 웹훅 5xx 0건**(계속 200 → outbox 계속 쌓임). 장애 중 PAYMENT_FAILED 16건 대기 → **복구 후 전부 SEAT_RELEASED**(outbox 239 = SEAT_RELEASED 239, 유실 0). **Consumer lag ~15초 만에 0**(커넥터 재시작 후). 장애 중 API P99 ~60ms(평상시와 동일). 오버셀 0. → **Kafka가 91초 죽어도 사용자 무영향 + 이벤트 유실 0.** Outbox 패턴이 Kafka를 critical path에서 뺀 것이 실측으로 확인됨.
+  - **발견/개선 포인트**: (1) Kafka 다운 시 Debezium 커넥터가 `UNASSIGNED`로 떨어져 자동 복구 안 됨 → 수동 재시작 필요(운영이라면 Connect 헬스체크 + 자동 재시작). (2) 부하 프로파일의 `nothingFor(40s)` 공백이 장애 구간 중간에 겹침 — 다음 라운드엔 없애거나 줄일 것.
+  - **다음**: ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).
 
 ## 다음 작업
 
@@ -125,7 +131,7 @@
 - `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
 - 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
 
-**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 완료 2026-09-03** → ②Kafka A-2 다음) → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음.
+**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 / ②Kafka A-2 둘 다 완료 2026-09-03**) → **3번 분산락 벤치마크(선행: DB 락 timeout 수정) — 다음** → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 

@@ -154,14 +154,21 @@ FROM section s WHERE s.id=<sid>;               -- confirmed <= total_quantity
 | 순서 | 동작 |
 |---|---|
 | 1 | `run-gatling.ps1 ... -Users 150 -RampSeconds 40 -TailSeconds 120` (총 390 VU — 위 "카오스 부하 규모" 표) |
-| 1-1 | **동시에** 결제 실패 웹훅 스크립트 실행 — outbox→Kafka 경로를 태우려면 장애 중 `PAYMENT_FAILED` 전이가 실제로 일어나야 한다. Gatling 골든패스는 결제 요청까지만 하므로, 일부 예약에 `Transaction.Failed` 웹훅을 쏘는 스크립트가 별도로 필요(A-2 준비 시 신설) |
+| 1-1 | **동시에** `powershell -File scripts/fail-payments.ps1 -EventId <id> -DurationSec 300` — outbox→Kafka 경로를 태우려면 장애 중 `PAYMENT_FAILED` 전이가 실제로 일어나야 한다. Gatling 골든패스는 결제 요청까지만 하므로, 이 스크립트가 주기적으로 `PAYMENT_REQUESTED` 예약을 조회해 일부에 서명된 `Transaction.Failed` 웹훅(`/api/v1/payments/webhook`)을 쏜다 → 각 건이 `markPaymentFailed`에서 `outbox_events` INSERT |
 | 2 | 좌석 홀드 트래픽이 흐르기 시작하면: `docker stop ticketrush-kafka` → 90초 → `docker start` (A-1과 같은 이유로 Pumba 대신 docker 직접) |
-| 3 | 필요 시 복구 후 `docker compose restart kafka-connect` (커넥터가 떨어지면) |
-| 4 | Grafana "밀린 메시지(Kafka Lag)" 패널로 복구 후 0 도달 시간 측정 + `outbox_events` 백로그가 쌓였다 비는지 |
+| 3 | 복구 후 커넥터가 떨어졌으면 `docker compose restart kafka-connect` → 필요 시 `register-outbox-connector.ps1` 재등록 |
+| 4 | Grafana "밀린 메시지(Kafka Lag)" 패널로 복구 후 0 도달 시간 측정 |
 
-**검증 SQL**:
+**검증 SQL** — `outbox_events`에는 발행 상태 컬럼이 없다(INSERT 전용, Debezium이 binlog로 읽음). "전부 발행됨"은 **모든 outbox 행이 결국 좌석 반납까지 도달했는지**로 확인한다:
 ```sql
-SELECT status, COUNT(*) FROM outbox_events GROUP BY status;   -- 복구 후 미발행 0
+-- 이 이벤트에서 실패 처리된 예약 수 = outbox 행 수
+SELECT
+  (SELECT COUNT(*) FROM outbox_events o
+     WHERE o.aggregate_type='reservation'
+       AND o.aggregate_id IN (SELECT id FROM reservation WHERE event_id=<id>)) AS outbox_rows,
+  SUM(status='PAYMENT_FAILED') AS stuck_failed,      -- 복구 후 0이어야 함 (컨슈머가 다 처리)
+  SUM(status='SEAT_RELEASED')  AS released           -- outbox_rows 와 일치해야 함
+FROM reservation WHERE event_id=<id>;
 ```
 ```
 # Consumer lag (복구 후 0 확인)
@@ -169,7 +176,7 @@ docker exec ticketrush-kafka kafka-consumer-groups --bootstrap-server localhost:
   --describe --group ticketrush-reservation
 ```
 
-**합격 기준**: 장애 중 결제 확정 실패 0건(Gatling에서 `payment-request` 5xx 없음) + 복구 후 `outbox_events` 전부 발행 + Consumer lag 0 도달 < 60초 + 결제 실패건 좌석이 결국 `SEAT_RELEASED`.
+**합격 기준**: 장애 중 `payment-request` 5xx 0건(결제 요청 API가 Kafka와 무관하게 계속 동작) + 장애 중에도 `Transaction.Failed` 웹훅이 정상 200(= `outbox_events` 계속 쌓임, 유실 아님) + 복구 후 `stuck_failed = 0` & `released = outbox_rows` + Consumer lag 0 도달 < 60초.
 
 ---
 

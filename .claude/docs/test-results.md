@@ -52,19 +52,28 @@
 
 ## 2. 카오스 A-2 — Kafka 브로커 다운
 
-> 계획: `test-plan.md` 2번 시나리오 A-2. 합격 기준: 결제 확정 실패 0 / outbox 전부 발행 / lag 0 도달 < 60초.
+> 계획: `test-plan.md` 2번 시나리오 A-2. 합격 기준: 결제 요청 5xx 0 / 이벤트 유실 0 / lag 0 도달 < 60초.
+> 측정 환경은 0번과 동일(2026-09-03, 커밋 `ea2de2a`). 스크린샷 `.claude/screenshots/tests/a2-kafka-down/`:
+> `4패널_전체사진.png` / `API응답시간.png` / `요청_에러율.png` / `밀린_메시지.png`(Kafka Consumer Lag) / `HikariCP_커넥션풀.png`. 모두 시간범위 `12:38:00~12:43:15`.
 
 | 항목 | 목표 | 실측 | 판정 |
 |---|---|---|---|
-| 부하 (동시/램프) | 150 / 40s | *(대기)* | — |
-| 장애 지속 | 90s | *(대기)* | — |
-| 장애 중 `payment-request` 5xx | 0건 | *(대기)* | — |
-| 장애 중 outbox 미발행 누적 | (참고, 유실 아님) | *(대기)* | — |
-| 복구 후 outbox 미발행 | 0건 | *(대기)* | — |
-| 복구 → Consumer lag 0 도달 | < 60s | *(대기)* | — |
-| 결제 실패건 좌석 최종 상태 | `SEAT_RELEASED` | *(대기)* | — |
+| 부하 (총 390 VU) | 버스트 105 + 트리클 45 + 꼬리 240 + `fail-payments.ps1`(FailRatio 0.8, 3초 간격) 병행 | Gatling 2,210 요청 전부 OK / 웹훅 238건 전송 | — |
+| 장애 지속 | ~90s | **91s** (12:39:09 → 12:40:40 KST / 02:39:09 → 02:40:40 UTC, `docker stop`→`start`) | ✅ |
+| **장애 중 `payment-request` 5xx** | 0건 | **0건** (301건 전부 201) | ✅ **PASS** |
+| **장애 중 웹훅(`/payments/webhook`) 5xx** | 0건 | **0건** (계속 200 → `outbox_events` 계속 INSERT) | ✅ **PASS** |
+| 장애 중 미처리 이벤트 (참고, 유실 아님) | — | PAYMENT_FAILED 16건이 DB에 쌓인 채 대기 (컨슈머가 브로커 없어 소비 불가) | — |
+| **복구 후 이벤트 유실** | 0 | **0** — outbox 239행 = SEAT_RELEASED 239건, PAYMENT_FAILED 0으로 드레인 | ✅ **PASS** |
+| **복구 → Consumer lag 0 도달** | < 60s | **~15초** (커넥터 재시작 후) — `CURRENT-OFFSET 239 = LOG-END-OFFSET 239, LAG 0` | ✅ **PASS** |
+| 장애 중 API P99 | (참고) | **54~110ms** (평상시와 동일 — Kafka 다운이 사용자 경로에 영향 없음) | ✅ |
+| 오버셀 (SQL a) | 0행 | **0행** | ✅ |
 
-**관찰 메모**: *(대기)*
+**관찰 메모**:
+- **핵심: Kafka가 91초 완전히 죽었는데 사용자 경로는 무영향.** `요청_에러율.png`는 장애 구간에도 초록(200·201)만 쌓이고 `401`·`503`·5xx 전부 0(`409`는 0.02 req/s = 정상적 좌석 경합). `API응답시간.png`의 P99는 장애 구간과 복구 후가 **구분 안 될 만큼 동일**(둘 다 ~60ms). 결제 요청·확정은 DB 트랜잭션 + outbox INSERT라 Kafka와 동기적으로 얽히지 않기 때문.
+- **이벤트 유실 0의 근거**: 장애 중 `markPaymentFailed`가 계속 성공(웹훅 200) → `outbox_events`에 행이 쌓임(DB라 안전). 컨슈머는 그동안 아무것도 처리 못 해 PAYMENT_FAILED 16건이 대기 상태로 남음. 복구 후 Debezium이 밀린 행을 발행 → 컨슈머가 소비 → 전부 `SEAT_RELEASED`. 최종 `outbox 239 = SEAT_RELEASED 239`, `stuck_failed = 0`.
+- **Debezium 커넥터가 자동 복구되지 않음**: Kafka 다운 시 커넥터가 `UNASSIGNED` 상태로 떨어지고, 브로커가 돌아와도 그대로 멈춰 있었다. `docker compose restart kafka-connect` + `register-outbox-connector.ps1` 재실행으로 복구. lag 0 도달 시간(~15초)은 이 수동 재시작 이후 기준이다. **개선 포인트**: 운영이라면 Connect 헬스체크 + 자동 재시작(또는 `errors.retry.timeout` 조정)이 필요.
+- **부하 프로파일의 40초 공백(`nothingFor`)이 장애 구간 중간(12:39:25~12:40:05)에 겹쳤다.** 장애 앞 36초(버스트 잔여)와 12:40:15 이후(꼬리 부하)는 트래픽으로 덮였지만, 다음 라운드에는 이 공백을 없애/줄여 장애 전 구간을 끊김 없이 덮는 게 낫다. 판정에는 영향 없음(에러 0, 유실 0).
+- **도구**: `fail-payments.ps1` 신규 — Gatling 골든패스는 결제 요청까지만 하므로, `PAYMENT_REQUESTED` 예약을 주기적으로 조회해 일부에 서명된 `Transaction.Failed` 웹훅을 쏴서 outbox→Kafka 경로를 실제로 태운다. test-plan.md A-2의 원래 검증 SQL(`SELECT status FROM outbox_events`)은 존재하지 않는 컬럼 참조라 함께 수정(outbox_events는 INSERT 전용, 발행 상태 컬럼 없음).
 
 ---
 
