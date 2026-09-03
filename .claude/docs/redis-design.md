@@ -125,21 +125,26 @@ decisions.md 5번. 결제 요청 API가 PG를 호출하기 직전 `SETNX`로 선
 ### 6. Rebuild 상태 마커
 
 ```
-key:   system:rebuild_epoch
+key:   system:rebuild_epoch:{eventId}
 type:  String
-value: rebuild 완료 시각 또는 임의 마커 값
+value: rebuild 완료 시각(epoch millis)
 TTL:   없음
 
 key:   rebuild:in_progress:{eventId}
 type:  String ("1")
-TTL:   짧은 TTL 병행 (안전장치) + RENAME 완료 시 명시적 DEL
+TTL:   짧은 TTL(안전장치) + rebuild 완료 시 명시적 DEL
 ```
 
-decisions.md 1번. `system:rebuild_epoch`는 전역 마커로, 앱 기동/재연결 시 이 마커가 살아있으면 데이터가 안전하다는 뜻이라 rebuild를 스킵한다. 없으면(진짜 데이터 유실) 이벤트별로 `rebuild:in_progress:{eventId}`를 세팅하고 rebuild를 실행한다.
+decisions.md 1번. `system:rebuild_epoch:{eventId}`가 있으면(=재연결일 뿐 데이터 유실 아님) 그 이벤트는 rebuild를 스킵해도 안전하다. 없으면(진짜 데이터 유실) `rebuild:in_progress:{eventId}` 락을 잡고 rebuild를 실행한다.
 
-**스코프를 이벤트 단위로 정한 이유**: `seat_status:{eventId}` Hash도 이벤트 단위로 `RENAME` 스왑되므로(3번), 플래그도 같은 스코프여야 앞뒤가 맞는다. 전역 플래그로 두면 한 이벤트의 rebuild 중에 트래픽과 무관한 다른 콘서트 조회 API까지 "일시 이용 불가"로 막아버리는 부작용이 생긴다(decisions.md 1번에서 이미 지적된 문제).
+**이벤트별 스코프인 이유**: `seat_status:{eventId}` Hash가 이벤트 단위이므로(3번), 마커도 같은 스코프여야 한다. 전역 마커였다면 이벤트 A 하나만 rebuild하고도 마커가 세팅돼 아직 확인 안 된 이벤트 B/C까지 "안전하다"고 잘못 판정하게 된다(decisions.md 1번에서 이미 지적된 문제이자, 실제 구현이 아래 트리거 방식을 바꾸며 확정된 부분).
 
-rebuild 실행 자체(다중 인스턴스 환경에서 단일 인스턴스만 수행)는 decisions.md 2번에서 채택되는 분산락 기술을 재사용해서 가드한다.
+**구현(`SeatStatusRebuildService`, 2026-09-01)이 원안과 다른 점 — 카오스 테스트 A-1 실행 중 원안이 코드에 전혀 반영돼 있지 않았던 걸 발견해 그 자리에서 구현하며 단순화함**:
+- **트리거**: 원안(앱 기동 1회 + Redis 재연결 이벤트 리스너)은 그 시점에 "활성 이벤트"를 전부 나열해야 하는 부담이 있었다. 대신 좌석 조회/홀드/해제/결제확정/취소 등 `seat_status`를 실제로 읽거나 쓰는 요청이 들어올 때마다 그 이벤트 하나만 확인하는 방식으로 바꿨다 — 이벤트 목록을 나열할 필요가 없고, 트래픽 없는 이벤트는 rebuild할 이유도 없다.
+- **원자적 교체**: 원안은 새 스테이징 키에 채운 뒤 `RENAME`으로 스왑했다. 실제로는 `rebuild:in_progress:{eventId}` 락이 이미 "rebuild 중에는 아무도 이 Hash를 읽지 않는다"를 보장하므로(락을 못 잡은 요청은 `SERVICE_TEMPORARILY_UNAVAILABLE`로 즉시 실패), 라이브 키를 직접 지우고 다시 채워도 동일한 안전성을 더 단순하게 얻는다.
+- **범위 밖으로 남긴 것**: `hold_schedule`(만료 스케줄) 자체는 재구성하지 않는다 — 장애 중 방치된 홀드/결제 요청은 이번 rebuild로 "점유 중"까지는 정확히 반영되지만, 스스로 만료되는 스케줄은 유실된 채 남는다(다음 결제 시도 실패나 수동 정리로만 해소, 알려진 한계).
+
+rebuild 락 자체는 단일 사이즈(짧은 TTL의 Redis `SETNX`)만으로 충분하다고 판단했다 — decisions.md 2번의 분산락 벤치마크(Redisson RLock vs DB 비관적 락)는 그룹 좌석 홀드처럼 "정합성 + 성능"을 동시에 따져야 하는 자리에 쓰는 것이고, rebuild 가드는 저빈도(마커 없을 때만) 실행이라 그 벤치마크 대상이 아니다.
 
 ---
 
@@ -201,8 +206,8 @@ decisions.md 3번(사용자 확인 완료). 클라이언트에는 httpOnly Cooki
 | `hold:{eventId}:{seatId}` / `hold:{eventId}:{accountId}:{sectionId}` | 홀드 성공 시 | `HoldExpiryScheduler` 처리 또는 명시적 해제 시 DEL | 홀드 TTL(보조 안전장치, 실제 만료 처리는 `hold_schedule`이 담당) |
 | `hold_schedule` (Sorted Set) | 홀드 성공 시 `ZADD` | 만료 처리/명시적 해제 시 `ZREM`, 결제 요청 시 `ZADD`로 재스케줄 예정(다음 단계) | 없음(원소 단위로 관리) |
 | `idempotency:{key}` | 결제 요청 시 `SETNX` | — | 홀드 TTL과 동일 |
-| `system:rebuild_epoch` | rebuild 완료 시 | 재연결마다 확인 | 없음 |
-| `rebuild:in_progress:{eventId}` | rebuild 시작 시 | RENAME 완료 시 DEL | 짧은 TTL(안전장치) |
+| `system:rebuild_epoch:{eventId}` | 이벤트 등록 시 + rebuild 완료 시 | seat_status를 읽거나 쓰는 요청마다 존재 확인 | 없음 |
+| `rebuild:in_progress:{eventId}` | rebuild 시작 시 | rebuild 완료 시 DEL | 짧은 TTL(안전장치) |
 | 그룹 좌석 락 | 미정 | 미정 | 미정 |
 | `active_reservation:{eventId}:{accountId}` | 홀드 성공 시 `SETNX` | `hold` 키와 동일한 시점(`HoldExpiryScheduler`/명시적 해제)에 DEL | `hold` 키와 동일(보조 안전장치) |
 | `refresh_token:{accountId}` | 로그인 성공 시 `SET` | 재발급 시 `SET`(덮어씀), 로그아웃 시 `DEL` | Refresh Token 만료 기간 |
@@ -211,7 +216,7 @@ decisions.md 3번(사용자 확인 완료). 클라이언트에는 httpOnly Cooki
 
 ## 장애 대비
 
-Redis가 재시작되거나 재연결되면 `system:rebuild_epoch` 마커 유무로 데이터 유실 여부를 먼저 판별한다(decisions.md 1번). 유실이 확인되면 이벤트별로 `rebuild:in_progress:{eventId}`를 세팅하고, DB(`reservation`의 `PAYMENT_CONFIRMED` + TTL 안 지난 `PAYMENT_REQUESTED`)를 기준으로 `seat_status:{eventId}`를 새 키에 재구성한 뒤 `RENAME`으로 원자적으로 교체한다. rebuild 중 대상 키가 없는 조회/홀드 요청은 플래그가 켜져 있으면 "일시 이용 불가"로, 플래그 없이 키만 없으면 에러+알림으로 처리한다(lazy 초기화 금지 — 오버셀로 이어질 수 있어 원천 차단).
+Redis가 재시작되면, `seat_status:{eventId}`를 읽거나 쓰는 요청이 들어올 때마다 그 이벤트의 `system:rebuild_epoch:{eventId}` 마커 유무로 데이터 유실 여부를 먼저 판별한다(decisions.md 1번, `SeatStatusRebuildService`). 마커가 없으면(진짜 유실) `rebuild:in_progress:{eventId}` 락을 잡고, DB(`reservation`의 `PAYMENT_CONFIRMED` + 결제 처리 타임아웃 안 지난 `PAYMENT_REQUESTED`)를 기준으로 `seat_status:{eventId}`를 다시 채운 뒤 마커를 세팅한다. 락을 못 잡은(=다른 요청이 이미 rebuild 중인) 요청은 `SERVICE_TEMPORARILY_UNAVAILABLE`(503)로 즉시 실패한다 — 매진과는 반드시 구분되는 별도 상태다(api-design.md 4번). 이 락이 "rebuild 중에는 아무도 이 Hash를 읽지 않는다"를 이미 보장하므로, lazy 초기화(오버셀로 이어질 수 있어 금지)나 별도 스테이징 키 없이도 안전하게 라이브 키를 직접 재구성한다(6번 참고 — 원안의 RENAME 스왑을 락으로 대신함).
 
 ## 남은 항목 (progress.md에서 계속 추적)
 

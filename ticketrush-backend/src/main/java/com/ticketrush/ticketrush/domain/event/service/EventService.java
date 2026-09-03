@@ -14,6 +14,7 @@ import com.ticketrush.ticketrush.domain.event.repository.SeatBulkInsertRepositor
 import com.ticketrush.ticketrush.domain.event.repository.SectionRepository;
 import com.ticketrush.ticketrush.domain.event.repository.SeatRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.SeatStatusRepository;
+import com.ticketrush.ticketrush.domain.seat.service.SeatStatusRebuildService;
 import com.ticketrush.ticketrush.global.exception.BusinessException;
 import com.ticketrush.ticketrush.global.exception.ErrorCode;
 import java.util.LinkedHashMap;
@@ -59,6 +60,7 @@ public class EventService {
     private final SeatRepository seatRepository;
     private final SeatBulkInsertRepository seatBulkInsertRepository;
     private final SeatStatusRepository seatStatusRepository;
+    private final SeatStatusRebuildService seatStatusRebuildService;
     private final AccountRepository accountRepository;
 
     @Transactional
@@ -105,6 +107,7 @@ public class EventService {
         Event event = eventRepository.findById(eventId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.EVENT_NOT_FOUND));
         List<Section> sections = sectionRepository.findAllByEventIdOrderByIdAsc(eventId);
+        seatStatusRebuildService.ensureFresh(eventId);
 
         // 조회 시에는 스탠딩 잔여 수량을 Redis 실시간 값으로 채운다.
         List<Long> standingSectionIds = sections.stream()

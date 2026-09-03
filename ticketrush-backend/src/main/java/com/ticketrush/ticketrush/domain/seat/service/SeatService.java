@@ -63,6 +63,7 @@ public class SeatService {
     private final ReservationRepository reservationRepository;
     private final QueueService queueService;
     private final GroupHoldLockStrategy groupHoldLockStrategy;
+    private final SeatStatusRebuildService seatStatusRebuildService;
     private final Duration holdTtl;
 
     public SeatService(
@@ -76,6 +77,7 @@ public class SeatService {
             ReservationRepository reservationRepository,
             QueueService queueService,
             GroupHoldLockStrategy groupHoldLockStrategy,
+            SeatStatusRebuildService seatStatusRebuildService,
             @Value("${seat.hold-ttl-millis}") long holdTtlMillis) {
         this.eventRepository = eventRepository;
         this.sectionRepository = sectionRepository;
@@ -87,6 +89,7 @@ public class SeatService {
         this.reservationRepository = reservationRepository;
         this.queueService = queueService;
         this.groupHoldLockStrategy = groupHoldLockStrategy;
+        this.seatStatusRebuildService = seatStatusRebuildService;
         this.holdTtl = Duration.ofMillis(holdTtlMillis);
     }
 
@@ -94,6 +97,7 @@ public class SeatService {
     public List<SeatStatusResponse> findStatuses(
             Long accountId, Long eventId, Long sectionId, String entryToken) {
         queueService.validateEntryToken(accountId, eventId, entryToken);
+        seatStatusRebuildService.ensureFresh(eventId);
 
         Section section = findSection(eventId, sectionId);
         if (section.isStanding()) {
@@ -117,6 +121,7 @@ public class SeatService {
         if (!eventRepository.existsById(eventId)) {
             throw new BusinessException(ErrorCode.EVENT_NOT_FOUND);
         }
+        seatStatusRebuildService.ensureFresh(eventId);
 
         if (request.seatIds() != null && !request.seatIds().isEmpty()) {
             return holdSeat(accountId, eventId, request);
@@ -126,6 +131,7 @@ public class SeatService {
 
     public void release(Long accountId, Long eventId, String entryToken) {
         queueService.validateEntryToken(accountId, eventId, entryToken);
+        seatStatusRebuildService.ensureFresh(eventId);
 
         activeReservationRepository.find(eventId, accountId)
                 .ifPresent(value -> releaseHold(accountId, eventId, HoldRecord.parse(value)));
@@ -277,6 +283,10 @@ public class SeatService {
      * 보조 기록일 뿐이라 정리 차원에서 지운다.
      */
     public void confirmHold(Long accountId, Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        // 이 메서드 자체는 seat_status를 건드리지 않지만(위 설명), 확정된 예약이 DB에 이미 있으니
+        // 혹시 그 사이 Redis가 유실됐다면 지금 다시 채워 넣어 "확정 좌석이 AVAILABLE로 보이는" 창을
+        // 최대한 좁힌다.
+        seatStatusRebuildService.ensureFresh(eventId);
         HoldRecord record = isSeatHold(seatIds)
                 ? HoldRecord.forSeats(eventId, accountId, sectionId, seatIds)
                 : HoldRecord.forStanding(eventId, accountId, sectionId, quantity);
@@ -292,6 +302,7 @@ public class SeatService {
 
     /** 결제 실패 시 Saga 보상 — 좌석/스탠딩을 원상복구한다(ReservationService가 호출). */
     public void compensate(Long accountId, Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        seatStatusRebuildService.ensureFresh(eventId);
         HoldRecord record = isSeatHold(seatIds)
                 ? HoldRecord.forSeats(eventId, accountId, sectionId, seatIds)
                 : HoldRecord.forStanding(eventId, accountId, sectionId, quantity);
@@ -305,6 +316,7 @@ public class SeatService {
      * 시점에 이미 전부 정리돼 있기 때문이다(그 세 키는 진행 중인 홀드에만 존재한다).
      */
     public void releaseConfirmed(Long eventId, Long sectionId, List<Long> seatIds, int quantity) {
+        seatStatusRebuildService.ensureFresh(eventId);
         if (isSeatHold(seatIds)) {
             seatIds.forEach(seatId -> seatStatusRepository.releaseSeat(eventId, seatId));
         } else {
