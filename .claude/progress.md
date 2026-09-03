@@ -96,7 +96,7 @@
 
 - **2026-09-03**: **카오스 A-1 (Redis 다운) 실행 완료 — 전부 통과. (`test-results.md` 1번, 스크린샷 `.claude/screenshots/tests/a1-redis-down/`)**
   - **선행 수정**: (1) `application.properties`에 `spring.data.redis.timeout=2000`(env `REDIS_TIMEOUT`) — 미설정 시 Lettuce 기본 60초라 장애 중 시작된 요청이 복구 후에도 최대 60초 매달렸다 실패(A-1 준비 중 발견). (2) `chaos-*.ps1`이 stop/start UTC 시각을 `scripts/chaos-timeline.log`(gitignore)에 기록. (3) `GoldenPathSimulation`/`run-gatling.ps1`에 chaos 모드 전용 꼬리 부하 옵션(`-TailSeconds`, 기본 0=꺼짐) — 복구 후에도 트래픽이 이어져 "장애→복구→정상 복귀"가 Grafana 한 화면에. 커밋: `feat(seat)` rebuild / `fix(chaos)` 스크립트 / `chore` 타임아웃·문서 / `chore(grafana)` 대시보드 한글화·Kafka lag 패널.
-  - **실행**: 클린 스택(`docker compose down -v`) + 새 이벤트(400석) + BUYER 400명. 150명(버스트 70%+트리클) + 꼬리 240명(2/s, 120s) 부하 중 `docker stop ticketrush-redis` → 61초 → `docker start`. (Pumba `stop --restart`는 이 환경에서 "no containers to stop"으로 불안정 → docker 직접.)
+  - **실행**: 클린 스택(`docker compose down -v`) + 새 이벤트(400석) + BUYER 400명. **총 390 VU** — 버스트 105(오픈 순간 동시) + 트리클 45(40초 분산) + 꼬리 240(초당 2명 × 120초, 복구 관찰용). 좌석 홀드 트래픽이 흐를 때 `docker stop ticketrush-redis` → 61초 → `docker start`. (Pumba `stop --restart`는 이 환경에서 "no containers to stop"으로 불안정 → docker 직접.)
   - **결과**: **오버셀 0** / Redis 복구 → seat_status 재구성 완료 **~4초** / rebuild **1회** + 락 경합 요청 `503` 3건 / **최대 응답시간 2,035ms**(타임아웃 2초 cap 확인 — 이전엔 60초 매달림). KO 1,187건 중 79%가 `404 QUEUE_ENTRY_NOT_FOUND`(Redis가 대기열 Sorted Set도 잃음 — decisions.md 1번 "알려진 한계"), 나머지는 장애 중 타임아웃 500·rebuild 가드 503. 진짜 서버 버그성 실패 0.
   - **다음 후보(안 고침)**: 장애 중 Redis 타임아웃을 일반 500이 아니라 503으로 매핑.
   - **다음**: ②Kafka 다운 → ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).

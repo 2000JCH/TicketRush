@@ -98,15 +98,27 @@ AWS는 EC2 한 대(4 vCPU/16 GiB)에 돈을 태우기 전에, 로컬 PC를 그 �
 ### 공통 준비
 
 1. `docker compose up -d` + 백엔드 `gradlew bootRun`
-2. `powershell -File scripts/seed-load-test.ps1 -Rows 20 -SeatsPerRow 20` → `eventId`, `sectionId` 확보 (400석)
+2. `powershell -File scripts/seed-load-test.ps1 -Rows 20 -SeatsPerRow 20 -BuyerCount 400` → `eventId`, `sectionId` 확보 (400석 / BUYER 400명 사전 로그인)
 3. Grafana(`localhost:3000`, admin/admin) → 대시보드 `TicketRush — 부하/카오스 관찰` 열어두기
-4. 장애 주입 시점을 Grafana 타임라인에 annotation으로 남기기 (수동)
+4. 장애 주입 시점을 Grafana 타임라인에 annotation으로 남기기 (`scripts/chaos-timeline.log`의 UTC 시각)
+
+### 카오스 부하 규모 (A-1·A-2 공통)
+
+`run-gatling.ps1 -Users 150 -RampSeconds 40 -TailSeconds 120` 은 **총 390 VU**를 투입한다:
+
+| 구간 | 인원 | 방식 |
+|---|---|---|
+| 버스트 | **105명** (`-Users` 150 × `-BurstRatio` 0.7) | 오픈 순간처럼 완전 동시 큐 진입 (`atOnceUsers`) |
+| 트리클 | **45명** (150 − 105) | 40초에 걸쳐 분산 유입 (`rampUsers`) |
+| 꼬리 | **240명** (초당 2명 × 120초) | 위가 끝나고 40초 뒤부터 지속 — 장애 **복구 후**에도 트래픽이 이어져 Grafana에 "정상 복귀"가 찍히게 하기 위함 |
+
+동시 부하 피크는 버스트 105 + 트리클 45 ≈ **150명**이 만들고, 꼬리는 초당 2명 도착이라 어느 순간에도 10~20명 수준의 얇은 흐름이다. 카오스는 "몇 명까지 버티나"(→ 4번 한계 테스트)가 아니라 "장애가 나도 정합성이 깨지지 않나"가 목적이므로, 좌석 400개에 경합이 충분히 생기는 이 규모로 고정한다. `-BuyerCount`는 390 이상이어야 계정이 재사용되지 않는다.
 
 ### 시나리오 A-1 — Redis 다운  ✅ 실행 완료 (2026-09-03, test-results.md 1번)
 
 | 순서 | 동작 |
 |---|---|
-| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40 -TailSeconds 120` (`-TailSeconds`는 복구 후에도 트래픽이 이어져 Grafana 그래프에 "정상 복귀"가 담기게 하는 chaos 모드 전용 꼬리 부하) |
+| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40 -TailSeconds 120` (총 390 VU — 위 "카오스 부하 규모" 표 참고) |
 | 2 | 좌석 홀드 트래픽이 흐르기 시작하면: `powershell -File scripts/chaos-redis.ps1 -DurationSec 60` — **단, Pumba `stop --restart`가 이 환경에서 불안정("no containers to stop")하므로 실제로는 `docker stop ticketrush-redis` → 60초 → `docker start ticketrush-redis`를 직접 썼다.** stop/start UTC 시각은 `scripts/chaos-timeline.log`에 기록 |
 | 3 | Grafana 관찰: 정지 중 에러율 급등 → 재시작 후 rebuild → 정상 복귀까지 시간 측정. `chaos-timeline.log`의 시각으로 annotation, 4패널 캡처 → `.claude/screenshots/tests/a1-redis-down/` |
 | 4 | Gatling 종료 후 정합성 검증 (아래 SQL, event_id 스코프) |
@@ -141,10 +153,11 @@ FROM section s WHERE s.id=<sid>;               -- confirmed <= total_quantity
 
 | 순서 | 동작 |
 |---|---|
-| 1 | `run-gatling.ps1 ... -Users 150 -RampSeconds 40` (결제 실패도 섞이도록 그룹 홀드 비중 유지) |
-| 2 | ~20초 후: `powershell -File scripts/chaos-kafka.ps1 -DurationSec 90` |
+| 1 | `run-gatling.ps1 ... -Users 150 -RampSeconds 40 -TailSeconds 120` (총 390 VU — 위 "카오스 부하 규모" 표) |
+| 1-1 | **동시에** 결제 실패 웹훅 스크립트 실행 — outbox→Kafka 경로를 태우려면 장애 중 `PAYMENT_FAILED` 전이가 실제로 일어나야 한다. Gatling 골든패스는 결제 요청까지만 하므로, 일부 예약에 `Transaction.Failed` 웹훅을 쏘는 스크립트가 별도로 필요(A-2 준비 시 신설) |
+| 2 | 좌석 홀드 트래픽이 흐르기 시작하면: `docker stop ticketrush-kafka` → 90초 → `docker start` (A-1과 같은 이유로 Pumba 대신 docker 직접) |
 | 3 | 필요 시 복구 후 `docker compose restart kafka-connect` (커넥터가 떨어지면) |
-| 4 | Grafana "Kafka Consumer Lag" 패널로 복구 후 lag 0 도달 시간 측정 |
+| 4 | Grafana "밀린 메시지(Kafka Lag)" 패널로 복구 후 0 도달 시간 측정 + `outbox_events` 백로그가 쌓였다 비는지 |
 
 **검증 SQL**:
 ```sql
