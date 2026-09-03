@@ -106,27 +106,35 @@ AWS는 EC2 한 대(4 vCPU/16 GiB)에 돈을 태우기 전에, 로컬 PC를 그 �
 
 | 순서 | 동작 |
 |---|---|
-| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40` |
-| 2 | 부하 시작 ~20초 후: `powershell -File scripts/chaos-redis.ps1 -DurationSec 60` (Redis SIGTERM → 60초 → 자동 재시작) |
-| 3 | Grafana 관찰: 정지 중 에러율 급등 → 재시작 후 rebuild → 정상 복귀까지 시간 측정 |
+| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40 -TailSeconds 120` (`-TailSeconds`는 복구 후에도 트래픽이 이어져 Grafana 그래프에 "정상 복귀"가 담기게 하는 chaos 모드 전용 꼬리 부하 — 스크린샷 실행에서만) |
+| 2 | 부하 시작 ~20초 후: `powershell -File scripts/chaos-redis.ps1 -DurationSec 60` (Redis SIGTERM → 60초 → 자동 재시작). stop/restart UTC 시각이 콘솔 + `scripts/chaos-timeline.log`에 찍힌다 |
+| 3 | Grafana 관찰: 정지 중 에러율 급등 → 재시작 후 rebuild → 정상 복귀까지 시간 측정. `chaos-timeline.log`의 시각으로 대시보드에 annotation을 찍고 4패널(응답시간 P50/P95/P99 · 상태코드별 · Kafka lag · HikariCP) 캡처 |
 | 4 | Gatling 종료 후 정합성 검증 (아래 SQL) |
 
 **정합성 검증 SQL** (`docker exec -e MYSQL_PWD=root ticketrush-mysql mysql -uroot ticketrush -e "..."`):
+
+> **2026-09-01 정정**: 아래는 원래 `rs.status='ACTIVE'`(존재하지 않는 enum 값이라 항상 0행 = 거짓 통과)와
+> `rs.section_id`(존재하지 않는 컬럼)를 쓰고 있었다 — 실제 실행 중 발견해 고쳤다. `reservation_seat.status`는
+> `reservation.status`와 같은 enum(`PAYMENT_REQUESTED`/`PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED`)을
+> 쓰고, 구역은 `seat.section_id`를 거쳐야 조인된다.
+
 ```sql
--- (a) 한 좌석에 활성 예약 2건 이상 → 오버셀
+-- (a) 한 좌석에 활성 예약 2건 이상 → 오버셀. rs.status가 아니라 r.status로 거른다 — 결제 실패
+-- (markPaymentFailed) 시점에 부모(reservation)는 즉시 PAYMENT_FAILED가 되지만 자식(reservation_seat)은
+-- Kafka Consumer가 releaseAfterFailure를 처리할 때까지 잠깐 PAYMENT_REQUESTED로 남아있을 수 있어서다.
 SELECT rs.seat_id, COUNT(*) c
 FROM reservation_seat rs JOIN reservation r ON r.id = rs.reservation_id
-WHERE r.status IN ('PAYMENT_REQUESTED','PAYMENT_CONFIRMED') AND rs.status='ACTIVE'
+WHERE r.status IN ('PAYMENT_REQUESTED','PAYMENT_CONFIRMED')
 GROUP BY rs.seat_id HAVING c > 1;              -- 0행 = 통과
 
--- (b) 확정 매수가 구역 정원을 넘는지
+-- (b) 확정 매수가 구역 정원을 넘는지 (reservation_seat -> seat -> section 순으로 조인)
 SELECT s.id, s.total_quantity,
-       (SELECT COUNT(*) FROM reservation_seat rs JOIN reservation r ON r.id=rs.reservation_id
-        WHERE rs.section_id=s.id AND r.status='PAYMENT_CONFIRMED') AS confirmed
+       (SELECT COUNT(*) FROM reservation_seat rs JOIN seat sk ON sk.id = rs.seat_id
+        WHERE sk.section_id = s.id AND rs.status='PAYMENT_CONFIRMED') AS confirmed
 FROM section s WHERE s.id=<sid>;               -- confirmed <= total_quantity
 ```
 
-**합격 기준**: (a)(b) 모두 통과 + Redis 복구~정상 응답 < 30초 + rebuild 마커(`system:rebuild_epoch`) 재설정 확인.
+**합격 기준**: (a)(b) 모두 통과 + Redis 복구~정상 응답 < 30초 + rebuild 마커(`system:rebuild_epoch:{eventId}`) 재설정 확인.
 장애 중 진행되던 좌석 홀드가 유실된 것은 **알려진 한계로 허용**(decisions.md 1번).
 
 ### 시나리오 A-2 — Kafka 브로커 다운

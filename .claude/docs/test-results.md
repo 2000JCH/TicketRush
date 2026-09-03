@@ -11,31 +11,41 @@
 
 | 항목 | 값 |
 |---|---|
-| 측정 일자 | *(대기)* |
-| 커밋 | *(대기)* |
-| 로컬 하드웨어 | *(대기 — CPU 모델 / 코어 / RAM)* |
+| 측정 일자 | 2026-09-01 |
+| 커밋 | `0ff9730` + 미커밋 변경(`SeatStatusRebuildService` 신규 — 이 회차 측정 직전에 구현, 다음 세션에서 커밋 예정) |
+| 로컬 하드웨어 | AMD Ryzen 5 5600 (6코어/12스레드) / RAM 16GiB |
 | 백엔드 | `gradlew bootRun` (호스트), JVM 힙 기본값 |
-| 인프라 | Docker Compose (MySQL 8.0 / Redis 7.2 / Kafka cp-kafka 7.7.0 / Kafka Connect debezium 2.6) |
+| 인프라 | Docker Compose (MySQL 8.0 / Redis 7.2 / Kafka cp-kafka 7.7.0 / Kafka Connect debezium 2.6), 무제한(리허설 오버레이 미적용) |
 | Gatling | io.gatling.gradle 3.15.1.3 |
-| 홀드 TTL / 입장 토큰 TTL | *(측정 시 사용한 값 — 운영 기본 10분인지 테스트용 단축값인지)* |
+| 홀드 TTL / 입장 토큰 TTL | 운영 기본값(10분, `seat.hold-ttl-millis` 미조정) |
 
 ---
 
 ## 1. 카오스 A-1 — Redis 다운
 
 > 계획: `test-plan.md` 2번 시나리오 A-1. 합격 기준: 오버셀 0 / 복구 < 30초 / rebuild 마커 재설정.
+>
+> **라운드 1 (2026-09-01, 아래 표)**: 합격 판정은 전부 통과했으나 Grafana 스냅샷을 남기지 못했고,
+> 관찰 메모의 "Redis 커맨드 타임아웃 미설정"을 그 뒤(2026-09-03) 수정했다.
+> **라운드 2 (예정)**: `spring.data.redis.timeout=2000` 반영 + 꼬리 부하(`-TailSeconds`)로
+> "장애→복구→정상 복귀"가 한 화면에 담기게 재실행 → Grafana 4패널 캡처 + 타임아웃 수정 효과
+> (장애 중 60초 지연 KO가 사라지는지) 재측정. `scripts/chaos-timeline.log`의 UTC 시각으로
+> 대시보드 annotation.
 
 | 항목 | 목표 | 실측 | 판정 |
 |---|---|---|---|
-| 부하 (동시/램프) | 150 / 40s | *(대기)* | — |
-| 장애 지속 | 60s (Pumba stop→restart) | *(대기)* | — |
-| 오버셀 (SQL a) | 0행 | *(대기)* | — |
-| 스탠딩 초과 (SQL b) | ≤ 정원 | *(대기)* | — |
-| Redis 복구 → 정상 응답 | < 30s | *(대기)* | — |
-| rebuild 마커 재설정 | 확인 | *(대기)* | — |
-| 장애 중 에러율 피크 | (참고) | *(대기)* | — |
+| 부하 (동시/램프) | 150 / 40s | 150명(`inject.mode=chaos`, 버스트 70%+트리클 30%) | — |
+| 장애 지속 | 60s (Pumba stop→restart) | 61s (03:09:42 stop → 03:10:43 restart, UTC) | ✅ |
+| 오버셀 (SQL a) | 0행 | **0행** | ✅ PASS |
+| 스탠딩 초과 (SQL b) | ≤ 정원 | 해당 구역 지정석 전용(스탠딩 없음) — N/A | — |
+| Redis 복구 → 정상 응답 | < 30s | **~6초** (03:10:43 복구 → 03:10:48.65 rebuild 완료 로그, 그 직후 요청부터 정상 200) | ✅ PASS |
+| rebuild 마커 재설정 | 확인 | `system:rebuild_epoch:210` 존재 확인(`EXISTS`=1) | ✅ |
+| 장애 중 에러율 피크 | (참고) | 총 996건 중 KO 206건(20.7%) — 아래 관찰 메모 참고 | 참고용 |
 
-**관찰 메모**: *(대기 — Grafana 캡처, 무엇이 어떻게 튀었는지)*
+**관찰 메모**:
+- **rebuild 가드가 실제 동시 트래픽에서 정확히 작동하는 것을 로그로 직접 확인**: Redis 복구 직후(03:10:48.646~648) 좌석 조회 요청 7건이 거의 동시에 마커 없음을 감지 → 그중 1건만 락을 잡고 재구성 수행(`SeatStatusRebuildService`가 `eventId=210, occupiedSeats=118`로 로그 남김, 03:10:48.650) → 나머지는 `503 SERVICE_TEMPORARILY_UNAVAILABLE`로 즉시 실패(재구성 도중 상태를 읽는 경로 자체가 차단됨을 실측으로 확인).
+- KO 206건 원인 분해: 대기열 재진입 필요(`404 QUEUE_ENTRY_NOT_FOUND`, 178건/86%, Redis가 대기열 Sorted Set도 함께 잃어서 발생 — decisions.md 1번의 "알려진 한계"에 해당) / rebuild 락 경합으로 인한 `503`(9건, 위 항목) / 장애 중 `GET /seats` 실패로 좌석 목록이 비어 이후 `seatIds:[]`로 홀드를 시도해 난 `400 INVALID_INPUT`(9건, Gatling 스크립트의 방어 로직이 만든 2차 실패이지 서버 버그 아님) / **60초 타임아웃**(9건 — 아래 참고) / 기타 `401`(1건, 원인 미조사).
+- **발견한 개선 여지 → 라운드 1 이후 수정(2026-09-03)**: Redis 커맨드에 명시적 타임아웃(`spring.data.redis.timeout`)이 없어 Lettuce 기본값(60초)이 그대로 적용됐다. 장애 중 시작된 요청은 Redis가 이미 복구됐어도 최대 60초까지 응답이 안 오고 `QueryTimeoutException`으로 늦게 실패했다 — 장애 지속시간(60s)과 우연히 비슷해 라운드 1 결과엔 큰 영향이 없었지만, 더 짧은 장애에서도 요청이 최대 60초씩 묶일 수 있다. → `spring.data.redis.timeout=2000`으로 설정(decisions.md 11번). 라운드 2에서 KO 분해의 "60초 타임아웃 9건"이 사라지는지 확인한다.
 
 ---
 
