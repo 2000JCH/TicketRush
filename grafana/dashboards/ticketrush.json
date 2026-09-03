@@ -4,7 +4,7 @@
   "tags": ["ticketrush"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "templating": {
@@ -67,14 +67,14 @@
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "카오스 시나리오 2(Kafka 브로커 다운): 브로커 복구 후 밀린 이벤트가 처리되며 lag이 0으로 수렴하는지 본다. decisions.md 8번.",
+      "description": "카오스 시나리오 2(Kafka 브로커 다운): 브로커 복구 후 밀린 이벤트가 처리되며 lag이 0으로 수렴하는지 본다. decisions.md 8번. 앱 재시작마다 client_id가 새로 붙어 죽은 시계열이 남으므로 max()로 살아있는 값만 본다.",
       "fieldConfig": {
         "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 } },
         "overrides": []
       },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "legendFormat": "{{client_id}}", "expr": "kafka_consumer_fetch_manager_records_lag_max{job=\"ticketrush\"}" }
+        { "refId": "A", "legendFormat": "밀린 메시지", "expr": "max(kafka_consumer_fetch_manager_records_lag_max{job=\"ticketrush\"})" }
       ]
     },
     {
@@ -83,19 +83,19 @@
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "pending가 0을 넘으면 DB 커넥션 대기 = 병목. DB 비관적 락 전략에서 특히 주시.",
+      "description": "대기(pending)가 0을 넘으면 DB 커넥션 대기 = 병목. DB 비관적 락 전략에서 특히 주시.",
       "fieldConfig": {
         "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "pending" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+          { "matcher": { "id": "byName", "options": "대기" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
         ]
       },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "legendFormat": "active", "expr": "hikaricp_connections_active{job=\"ticketrush\"}" },
-        { "refId": "B", "legendFormat": "pending", "expr": "hikaricp_connections_pending{job=\"ticketrush\"}" },
-        { "refId": "C", "legendFormat": "idle", "expr": "hikaricp_connections_idle{job=\"ticketrush\"}" },
-        { "refId": "D", "legendFormat": "max", "expr": "hikaricp_connections_max{job=\"ticketrush\"}" }
+        { "refId": "A", "legendFormat": "사용 중", "expr": "hikaricp_connections_active{job=\"ticketrush\"}" },
+        { "refId": "B", "legendFormat": "대기", "expr": "hikaricp_connections_pending{job=\"ticketrush\"}" },
+        { "refId": "C", "legendFormat": "여유(가용)", "expr": "hikaricp_connections_idle{job=\"ticketrush\"}" },
+        { "refId": "D", "legendFormat": "최대", "expr": "hikaricp_connections_max{job=\"ticketrush\"}" }
       ]
     }
   ]
