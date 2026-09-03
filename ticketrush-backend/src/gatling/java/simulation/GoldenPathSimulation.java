@@ -71,6 +71,15 @@ public class GoldenPathSimulation extends Simulation {
     private static final double BURST_RATIO = Double.parseDouble(System.getProperty("burst.ratio", "0.7"));
     /** 대기열 폴링 최대 시도 횟수 (1초 pause와 곱해 대기 상한이 된다). */
     private static final int QUEUE_POLL_MAX = Integer.getInteger("queue.poll.max", 30);
+    /**
+     * chaos 모드 전용 꼬리 부하 — 버스트+트리클이 끝난 뒤 {@code tail.seconds}초 동안 초당
+     * {@code tail.users.per.sec}명을 꾸준히 더 투입한다. 기본값 0(꺼짐)이라 평소 실행에는 영향이 없고,
+     * 카오스 테스트에서 "장애 → 복구 → 정상 복귀"가 Grafana 그래프 한 화면에 다 담기도록(복구 후에도
+     * 신선한 트래픽이 계속 흘러야 P95/P99·에러율 선이 정상으로 내려가는 게 보인다) 스크린샷 실행에서만 켠다.
+     */
+    private static final int TAIL_SECONDS = Integer.getInteger("tail.seconds", 0);
+    private static final double TAIL_USERS_PER_SEC =
+            Double.parseDouble(System.getProperty("tail.users.per.sec", "2"));
 
     private final HttpProtocolBuilder httpProtocol = http
             .baseUrl(BASE_URL)
@@ -172,12 +181,17 @@ public class GoldenPathSimulation extends Simulation {
         }
         int burstUsers = (int) Math.round(USERS * BURST_RATIO);
         int trickleUsers = USERS - burstUsers;
-        if (trickleUsers <= 0) {
-            return scenario.injectOpen(atOnceUsers(burstUsers));
+        var steps = new java.util.ArrayList<io.gatling.javaapi.core.OpenInjectionStep>();
+        steps.add(atOnceUsers(burstUsers));
+        if (trickleUsers > 0) {
+            steps.add(rampUsers(trickleUsers).during(Duration.ofSeconds(RAMP_SECONDS)));
+        }
+        if (TAIL_SECONDS > 0) {
+            steps.add(nothingFor(Duration.ofSeconds(RAMP_SECONDS)));
+            steps.add(constantUsersPerSec(TAIL_USERS_PER_SEC).during(Duration.ofSeconds(TAIL_SECONDS)));
         }
         return scenario.injectOpen(
-                atOnceUsers(burstUsers),
-                rampUsers(trickleUsers).during(Duration.ofSeconds(RAMP_SECONDS)));
+                steps.toArray(new io.gatling.javaapi.core.OpenInjectionStep[0]));
     }
 
     {

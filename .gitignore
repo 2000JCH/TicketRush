@@ -45,3 +45,6 @@ out/
 
 ### Generated load-test fixtures (scripts/seed-load-test.ps1 output) ###
 **/src/gatling/resources/data/buyers.csv
+
+### Chaos test fault-injection timeline (scripts/chaos-*.ps1 output) ###
+scripts/chaos-timeline.log
