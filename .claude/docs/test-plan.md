@@ -102,14 +102,14 @@ AWS는 EC2 한 대(4 vCPU/16 GiB)에 돈을 태우기 전에, 로컬 PC를 그 �
 3. Grafana(`localhost:3000`, admin/admin) → 대시보드 `TicketRush — 부하/카오스 관찰` 열어두기
 4. 장애 주입 시점을 Grafana 타임라인에 annotation으로 남기기 (수동)
 
-### 시나리오 A-1 — Redis 다운
+### 시나리오 A-1 — Redis 다운  ✅ 실행 완료 (2026-09-03, test-results.md 1번)
 
 | 순서 | 동작 |
 |---|---|
-| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40 -TailSeconds 120` (`-TailSeconds`는 복구 후에도 트래픽이 이어져 Grafana 그래프에 "정상 복귀"가 담기게 하는 chaos 모드 전용 꼬리 부하 — 스크린샷 실행에서만) |
-| 2 | 부하 시작 ~20초 후: `powershell -File scripts/chaos-redis.ps1 -DurationSec 60` (Redis SIGTERM → 60초 → 자동 재시작). stop/restart UTC 시각이 콘솔 + `scripts/chaos-timeline.log`에 찍힌다 |
-| 3 | Grafana 관찰: 정지 중 에러율 급등 → 재시작 후 rebuild → 정상 복귀까지 시간 측정. `chaos-timeline.log`의 시각으로 대시보드에 annotation을 찍고 4패널(응답시간 P50/P95/P99 · 상태코드별 · Kafka lag · HikariCP) 캡처 |
-| 4 | Gatling 종료 후 정합성 검증 (아래 SQL) |
+| 1 | `powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 150 -RampSeconds 40 -TailSeconds 120` (`-TailSeconds`는 복구 후에도 트래픽이 이어져 Grafana 그래프에 "정상 복귀"가 담기게 하는 chaos 모드 전용 꼬리 부하) |
+| 2 | 좌석 홀드 트래픽이 흐르기 시작하면: `powershell -File scripts/chaos-redis.ps1 -DurationSec 60` — **단, Pumba `stop --restart`가 이 환경에서 불안정("no containers to stop")하므로 실제로는 `docker stop ticketrush-redis` → 60초 → `docker start ticketrush-redis`를 직접 썼다.** stop/start UTC 시각은 `scripts/chaos-timeline.log`에 기록 |
+| 3 | Grafana 관찰: 정지 중 에러율 급등 → 재시작 후 rebuild → 정상 복귀까지 시간 측정. `chaos-timeline.log`의 시각으로 annotation, 4패널 캡처 → `.claude/screenshots/tests/a1-redis-down/` |
+| 4 | Gatling 종료 후 정합성 검증 (아래 SQL, event_id 스코프) |
 
 **정합성 검증 SQL** (`docker exec -e MYSQL_PWD=root ticketrush-mysql mysql -uroot ticketrush -e "..."`):
 

@@ -11,8 +11,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 측정 일자 | 2026-09-01 |
-| 커밋 | `0ff9730` + 미커밋 변경(`SeatStatusRebuildService` 신규 — 이 회차 측정 직전에 구현, 다음 세션에서 커밋 예정) |
+| 측정 일자 | 2026-09-03 |
+| 커밋 | `ea2de2a` (`spring.data.redis.timeout=2000` 포함) |
 | 로컬 하드웨어 | AMD Ryzen 5 5600 (6코어/12스레드) / RAM 16GiB |
 | 백엔드 | `gradlew bootRun` (호스트), JVM 힙 기본값 |
 | 인프라 | Docker Compose (MySQL 8.0 / Redis 7.2 / Kafka cp-kafka 7.7.0 / Kafka Connect debezium 2.6), 무제한(리허설 오버레이 미적용) |
@@ -24,28 +24,29 @@
 ## 1. 카오스 A-1 — Redis 다운
 
 > 계획: `test-plan.md` 2번 시나리오 A-1. 합격 기준: 오버셀 0 / 복구 < 30초 / rebuild 마커 재설정.
->
-> **라운드 1 (2026-09-01, 아래 표)**: 합격 판정은 전부 통과했으나 Grafana 스냅샷을 남기지 못했고,
-> 관찰 메모의 "Redis 커맨드 타임아웃 미설정"을 그 뒤(2026-09-03) 수정했다.
-> **라운드 2 (예정)**: `spring.data.redis.timeout=2000` 반영 + 꼬리 부하(`-TailSeconds`)로
-> "장애→복구→정상 복귀"가 한 화면에 담기게 재실행 → Grafana 4패널 캡처 + 타임아웃 수정 효과
-> (장애 중 60초 지연 KO가 사라지는지) 재측정. `scripts/chaos-timeline.log`의 UTC 시각으로
-> 대시보드 annotation.
+> 스크린샷 `.claude/screenshots/tests/a1-redis-down/`: `4패널_전체사진.png` / `API응답시간.png` / `요청_에러율.png` / `HikariCP_커넥션풀.png`.
 
 | 항목 | 목표 | 실측 | 판정 |
 |---|---|---|---|
-| 부하 (동시/램프) | 150 / 40s | 150명(`inject.mode=chaos`, 버스트 70%+트리클 30%) | — |
-| 장애 지속 | 60s (Pumba stop→restart) | 61s (03:09:42 stop → 03:10:43 restart, UTC) | ✅ |
-| 오버셀 (SQL a) | 0행 | **0행** | ✅ PASS |
-| 스탠딩 초과 (SQL b) | ≤ 정원 | 해당 구역 지정석 전용(스탠딩 없음) — N/A | — |
-| Redis 복구 → 정상 응답 | < 30s | **~6초** (03:10:43 복구 → 03:10:48.65 rebuild 완료 로그, 그 직후 요청부터 정상 200) | ✅ PASS |
-| rebuild 마커 재설정 | 확인 | `system:rebuild_epoch:210` 존재 확인(`EXISTS`=1) | ✅ |
-| 장애 중 에러율 피크 | (참고) | 총 996건 중 KO 206건(20.7%) — 아래 관찰 메모 참고 | 참고용 |
+| 부하 | 150(버스트 70%+트리클 30%) + 꼬리 240(2 req/s, 120s) | 총 3,134 요청 (OK 1,947 / KO 1,187) | — |
+| 장애 지속 | ~60s | **61s** (11:38:22 → 11:39:23 KST / 02:38:22 → 02:39:23 UTC, `docker stop`→`start` 직접) | ✅ |
+| **오버셀 (SQL a)** | 0행 | **0행** | ✅ **PASS** |
+| 스탠딩 초과 (SQL b) | ≤ 정원 | 지정석 전용(스탠딩 없음) — N/A | — |
+| **Redis 복구 → seat_status 재구성 완료** | < 30s | **~4초** (11:39:23 복구 → Lettuce 재연결 11:39:25.9 → rebuild 완료 11:39:26.95 `occupiedSeats=144`) | ✅ **PASS** |
+| rebuild 마커 재설정 | 확인 | `system:rebuild_epoch:1` 존재, `rebuild:in_progress:*` 잔여 없음 | ✅ |
+| rebuild 실행 횟수 | 1회 (가드) | **1회** + 락 경합 요청 `503` 3건 (부분 재구성 상태를 아무도 안 읽음) | ✅ |
+| **최대 응답시간** | (참고 — 타임아웃 수정 효과) | **2,035ms** (P95 2,011 / P99 2,020, 전체). 성공분만: P95 400ms / P99 660ms | ✅ 2초 cap 확인 |
+| Redis 커맨드 타임아웃 발생 | (참고) | `Redis command timed out` 505건, 전부 ~2초 만에 실패 (라운드가 없던 이전엔 Lettuce 기본 60초였음) | — |
 
 **관찰 메모**:
-- **rebuild 가드가 실제 동시 트래픽에서 정확히 작동하는 것을 로그로 직접 확인**: Redis 복구 직후(03:10:48.646~648) 좌석 조회 요청 7건이 거의 동시에 마커 없음을 감지 → 그중 1건만 락을 잡고 재구성 수행(`SeatStatusRebuildService`가 `eventId=210, occupiedSeats=118`로 로그 남김, 03:10:48.650) → 나머지는 `503 SERVICE_TEMPORARILY_UNAVAILABLE`로 즉시 실패(재구성 도중 상태를 읽는 경로 자체가 차단됨을 실측으로 확인).
-- KO 206건 원인 분해: 대기열 재진입 필요(`404 QUEUE_ENTRY_NOT_FOUND`, 178건/86%, Redis가 대기열 Sorted Set도 함께 잃어서 발생 — decisions.md 1번의 "알려진 한계"에 해당) / rebuild 락 경합으로 인한 `503`(9건, 위 항목) / 장애 중 `GET /seats` 실패로 좌석 목록이 비어 이후 `seatIds:[]`로 홀드를 시도해 난 `400 INVALID_INPUT`(9건, Gatling 스크립트의 방어 로직이 만든 2차 실패이지 서버 버그 아님) / **60초 타임아웃**(9건 — 아래 참고) / 기타 `401`(1건, 원인 미조사).
-- **발견한 개선 여지 → 라운드 1 이후 수정(2026-09-03)**: Redis 커맨드에 명시적 타임아웃(`spring.data.redis.timeout`)이 없어 Lettuce 기본값(60초)이 그대로 적용됐다. 장애 중 시작된 요청은 Redis가 이미 복구됐어도 최대 60초까지 응답이 안 오고 `QueryTimeoutException`으로 늦게 실패했다 — 장애 지속시간(60s)과 우연히 비슷해 라운드 1 결과엔 큰 영향이 없었지만, 더 짧은 장애에서도 요청이 최대 60초씩 묶일 수 있다. → `spring.data.redis.timeout=2000`으로 설정(decisions.md 11번). 라운드 2에서 KO 분해의 "60초 타임아웃 9건"이 사라지는지 확인한다.
+- **핵심: 폭주 + Redis 완전 유실(디스크 저장 off) 상황에서도 오버셀 0.** rebuild가 DB(`PAYMENT_CONFIRMED` + 타임아웃 안 지난 `PAYMENT_REQUESTED`)를 기준으로 `seat_status:1`을 다시 채웠고, 그 뒤 꼬리 부하가 잡은 좌석까지 `HSETNX` + `reservation_seat` 2차 방어선으로 충돌 없이 처리됐다. 종료 시 DB 활성 좌석 248개 / Redis HELD 필드 245개(±3, rebuild 스냅샷과 이후 유입 사이의 정상 시차) — 오버셀 SQL은 0행.
+- **rebuild 가드 작동**: Redis가 빈 상태로 복구된 직후 여러 요청이 동시에 "마커 없음"을 감지 → 1건만 락을 잡고 재구성, 나머지는 `503 SERVICE_TEMPORARILY_UNAVAILABLE`(3건 기록)로 즉시 실패. 매진(409)과 구분되는 별도 상태.
+- **타임아웃 수정 효과 확인 (`spring.data.redis.timeout=2000`, 커밋 `81fb8b7`)**: 장애 중 Redis 커맨드가 60초 매달리지 않고 2초에 끊겨 `QueryTimeoutException` → 500으로 빠르게 실패(505건). `API응답시간.png`의 P99가 장애 구간 내내 **~2.1초 평평한 천장**을 만든 뒤 복구와 함께 뚝 떨어지는 게 이 cap이다.
+- **KO 1,187건 분해**: `404 QUEUE_ENTRY_NOT_FOUND` **941건(79%)** — Redis가 대기열 Sorted Set(`queue:{eventId}`)도 함께 잃어, 입장 토큰을 받았던 사용자가 재진입해야 함. **decisions.md 1번의 "알려진 한계"** (`요청_에러율.png`의 복구 직후 빨간 언덕이 이것). / `500` 장애 중 Redis 타임아웃 **~240건** / `503` rebuild 락 경합 3건 / `400 INVALID_INPUT` 3건(장애 중 `GET /seats` 실패 → Gatling이 빈 `seatIds`로 홀드 시도, 스크립트 부작용). **진짜 서버 버그성 실패는 0.**
+- **HikariCP는 거의 무변화**(최대 10 → 사용 중 최대 1, 여유 최소 9): Redis 장애는 DB 커넥션 풀에 영향 없음 — `HikariCP_커넥션풀.png`.
+- **Kafka Consumer Lag 0 유지**: Redis 장애가 Kafka 경로로 번지지 않음 — 4패널 전체 캡처.
+- **개선 여지(안 고침)**: 장애 중 Redis 타임아웃이 일반 `500`으로 나간다 — `503`(일시적 이용 불가)이 더 적절. 다음 라운드 후보(decisions.md 11번).
+- **도구 메모**: `scripts/chaos-redis.ps1`의 Pumba `stop --restart`가 이 환경에서 "no containers to stop"으로 불안정 → 이번엔 `docker stop`/`docker start`를 직접 썼다. Pumba 경로는 별도 점검 필요.
 
 ---
 

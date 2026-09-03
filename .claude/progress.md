@@ -89,18 +89,17 @@
      내려둠. Prometheus/Grafana는 AWS EC2 박스에 포함되는 구성요소가 아니라 제한 대상에서 제외.
      `test-plan.md` 0-1번(신규)·4번(한계 테스트는 이 리허설 스택으로 진행)·3번(분산락 명령 예시에
      `-InjectMode atonce`, `-BuyerCount` 반영)에 문서화 완료.
-- **2026-09-01**: **Phase 2 카오스 테스트 A-1(Redis 다운) 착수 — 도구 버그 2건 + 설계·구현 간극 1건을 실행 중에 발견해 그 자리에서 고침.**
-  1. **Pumba 스크립트가 이 PC에서 조용히 멈추는 버그 발견·수정**: `chaos-redis.ps1`/`chaos-kafka.ps1`이 `docker run ...`을 그냥 `docker`로 호출하고 있었는데, 이 PC는 **PowerShell PATH에 docker가 없고 Git Bash에만 있어서**(seed 스크립트 작성 때도 겪었던 문제, progress.md 2026-08-28 항목 참고) PowerShell이 "파일 열기" 팝업을 띄우며 조용히 멈췄다 — 에러 없이 그냥 안 끝나서 원인 파악에 시간이 걸림. `Get-Command docker`로 실제 docker.exe 경로를 찾고, 실패하면 Docker Desktop 기본 설치 경로로 폴백하도록 두 스크립트 모두 수정. 첫 시도(무효)에서는 이 버그 때문에 Redis가 실제로 한 번도 안 내려갔는데 Gatling은 정상 완료돼버려(KO 0) 장애 주입 없는 실행이 그대로 끝날 뻔했다.
-  2. **`test-plan.md`의 오버셀 검증 SQL 버그 발견·수정**: `rs.status='ACTIVE'`(존재하지 않는 enum 값이라 항상 0행=거짓 통과)와 `rs.section_id`(존재하지 않는 컬럼, `seat.section_id`를 거쳐야 함) 두 군데가 틀려있었다. 재수정한 SQL로 실제 검증하니 오버셀 0건(정상) — 다만 이 SQL 버그 때문에 지금까지 이 검증이 한 번도 제대로 실행된 적이 없었다는 뜻이라, "통과했다"는 착시를 실제로 겪은 셈.
-  3. **rebuild 로직 자체가 코드에 없다는 걸 발견 → 그 자리에서 구현**: 상세는 위 2026-08-19 항목(홀드 TTL/만료 처리)이 아니라 decisions.md 1번 "Redis 장애 시 홀드 상태 복구 전략"·portfolio.md 소재 6·redis-design.md 6번 참고. 요약: `SeatStatusRebuildService` 신규(좌석 조회/홀드/해제/결제확정/취소 진입점에서 이벤트별 rebuild 마커 확인 → 없으면 DB 기준으로 `seat_status` 재구성), 관련 리포지토리 쿼리 2개(`ReservationSeatRepository.findOccupiedSeatIdsByEventId`, `ReservationRepository.sumOccupiedStandingByEventId`) 신규, `SeatStatusRepository`에 마커/락/재구성 프리미티브 추가, 새 에러 코드는 api-design.md에 이미 설계돼 있던 `SERVICE_TEMPORARILY_UNAVAILABLE`(503)를 그대로 씀(처음엔 임의로 다른 이름을 만들었다가 기존 설계와 대조해 정정). 좌석 하나를 결제 요청 상태로 만들고 Redis 키를 강제로 지워 재현하는 시나리오로 검증 완료(재구성 후 같은 좌석 재홀드 시도가 정확히 409로 거절됨). 기존 자동 테스트 전부 통과. `decisions.md` 1번·`redis-design.md` 6번(원 설계와 다르게 구현한 부분: 재연결 이벤트 트리거 → 요청 경로 트리거, RENAME 스왑 → 락으로 대체)에 반영 완료.
-  - **카오스 A-1 라운드 1 공식 실행 완료(같은 날)**: `eventId=210`(400석)에 150명(버스트+트리클) 부하 중 Redis 61초 다운→복구. **오버셀 0건, Redis 복구~정상응답 ~6초(목표 30초 이내) 전부 통과.** 특히 **rebuild 락 가드가 실제 동시 트래픽에서 작동하는 걸 로그로 확인** — 복구 직후 좌석 조회 7건이 동시에 마커 없음을 감지했는데 1건만 재구성을 수행하고 나머지 6건은 `503 SERVICE_TEMPORARILY_UNAVAILABLE`로 즉시 실패(부분 재구성 상태를 아무도 안 읽음). 부수 발견: `spring.data.redis.timeout` 미설정으로 Lettuce 기본 60초 타임아웃이 그대로 적용되는 것 확인. 결과는 `test-results.md` 1번에 기록 완료.
+- **2026-09-01**: **Phase 2 카오스 테스트 A-1(Redis 다운) 준비 중 — 도구 버그 2건 + 설계·구현 간극 1건을 발견해 그 자리에서 고침.**
+  1. **Pumba 스크립트가 이 PC에서 조용히 멈추는 버그 발견·수정**: `chaos-redis.ps1`/`chaos-kafka.ps1`이 `docker run ...`을 그냥 `docker`로 호출했는데, 이 PC는 **PowerShell PATH에 docker가 없고 Git Bash에만 있어서**(seed 스크립트 때도 겪음, 2026-08-28 항목) PowerShell이 "파일 열기" 팝업을 띄우며 조용히 멈췄다. `Get-Command docker`로 실제 docker.exe 경로를 찾고, 실패 시 Docker Desktop 기본 경로로 폴백하도록 두 스크립트 수정.
+  2. **`test-plan.md`의 오버셀 검증 SQL 버그 발견·수정**: `rs.status='ACTIVE'`(존재하지 않는 enum 값 → 항상 0행=거짓 통과)와 `rs.section_id`(존재하지 않는 컬럼, `seat.section_id`를 거쳐야 함) 두 군데. SQL 버그 탓에 이 검증이 한 번도 제대로 돈 적이 없었다는 뜻이라, "통과했다"는 착시를 실제로 겪은 셈.
+  3. **rebuild 로직 자체가 코드에 없다는 걸 발견 → 구현**: decisions.md 1번·portfolio.md 소재 6·redis-design.md 6번 참고. `SeatStatusRebuildService` 신규(좌석 조회/홀드/해제/결제확정/취소 진입점에서 이벤트별 rebuild 마커 확인 → 없으면 DB 기준으로 `seat_status` 재구성), 리포지토리 쿼리 2개 신규, `SeatStatusRepository`에 마커/락/재구성 프리미티브 추가, 에러 코드는 api-design.md에 이미 있던 `SERVICE_TEMPORARILY_UNAVAILABLE`(503) 재사용. 좌석 하나를 결제 요청 상태로 만들고 Redis 키를 강제로 지워 재현하는 시나리오로 검증(재구성 후 같은 좌석 재홀드가 정확히 409). 기존 자동 테스트 전부 통과. `decisions.md` 1번·`redis-design.md` 6번(재연결 이벤트 트리거 → 요청 경로 트리거, RENAME 스왑 → 락)에 반영.
 
-- **2026-09-03**: **카오스 A-1 라운드 2 재실행 준비 — 커밋 + Redis 타임아웃 수정 + Grafana 캡처 준비(사용자가 AskUserQuestion으로 이 범위 선택).**
-  - **재실행 이유**: 라운드 1에서 Grafana 스냅샷을 안 남겨 포트폴리오에 쓸 그래프가 없다. 겸사겸사 라운드 1에서 발견만 해둔 Redis 타임아웃도 이번에 고쳐 "발견 → 수정 → 재측정" before/after로 만든다.
-  - **Redis 커맨드 타임아웃 수정**: `application.properties`에 `spring.data.redis.timeout=2000`(env `REDIS_TIMEOUT`) 추가. 미설정 시 Lettuce 기본 60초라 장애 중 시작된 요청이 복구 후에도 최대 60초 매달렸다 `QueryTimeoutException`으로 실패(라운드 1 KO 분해의 "60초 타임아웃 9건"). 정상 P99 ~90ms라 2초는 여유가 충분. `decisions.md` 11번(미확정 → 반영), `test-results.md` 1번 관찰 메모 갱신. 라운드 2에서 그 9건이 사라지는지 재측정.
-  - **Grafana 캡처 준비**: (1) `scripts/chaos-redis.ps1`/`chaos-kafka.ps1`이 stop/restart UTC 시각을 콘솔 + `scripts/chaos-timeline.log`(gitignore)에 남긴다 → 대시보드 annotation을 정확히 찍기 위함. (2) `GoldenPathSimulation`에 chaos 모드 전용 꼬리 부하 옵션(`-Dtail.seconds`/`-Dtail.users.per.sec`, 기본 0=꺼짐) + `run-gatling.ps1 -TailSeconds`/`-TailUsersPerSec` — 장애 복구 후에도 트래픽이 이어져 "장애→복구→정상 복귀"가 Grafana 한 화면에 담기게. 평소 실행엔 영향 없음.
-  - **검증**: `gradlew compileJava gatlingClasses` 통과, `gradlew test` 17개 전부 통과(인프라 mysql/redis/kafka 기동 후).
-  - **다음**: A-1 라운드 2 실제 실행 + Grafana 4패널 캡처 → ②Kafka 다운 → ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).
+- **2026-09-03**: **카오스 A-1 (Redis 다운) 실행 완료 — 전부 통과. (`test-results.md` 1번, 스크린샷 `.claude/screenshots/tests/a1-redis-down/`)**
+  - **선행 수정**: (1) `application.properties`에 `spring.data.redis.timeout=2000`(env `REDIS_TIMEOUT`) — 미설정 시 Lettuce 기본 60초라 장애 중 시작된 요청이 복구 후에도 최대 60초 매달렸다 실패(A-1 준비 중 발견). (2) `chaos-*.ps1`이 stop/start UTC 시각을 `scripts/chaos-timeline.log`(gitignore)에 기록. (3) `GoldenPathSimulation`/`run-gatling.ps1`에 chaos 모드 전용 꼬리 부하 옵션(`-TailSeconds`, 기본 0=꺼짐) — 복구 후에도 트래픽이 이어져 "장애→복구→정상 복귀"가 Grafana 한 화면에. 커밋: `feat(seat)` rebuild / `fix(chaos)` 스크립트 / `chore` 타임아웃·문서 / `chore(grafana)` 대시보드 한글화·Kafka lag 패널.
+  - **실행**: 클린 스택(`docker compose down -v`) + 새 이벤트(400석) + BUYER 400명. 150명(버스트 70%+트리클) + 꼬리 240명(2/s, 120s) 부하 중 `docker stop ticketrush-redis` → 61초 → `docker start`. (Pumba `stop --restart`는 이 환경에서 "no containers to stop"으로 불안정 → docker 직접.)
+  - **결과**: **오버셀 0** / Redis 복구 → seat_status 재구성 완료 **~4초** / rebuild **1회** + 락 경합 요청 `503` 3건 / **최대 응답시간 2,035ms**(타임아웃 2초 cap 확인 — 이전엔 60초 매달림). KO 1,187건 중 79%가 `404 QUEUE_ENTRY_NOT_FOUND`(Redis가 대기열 Sorted Set도 잃음 — decisions.md 1번 "알려진 한계"), 나머지는 장애 중 타임아웃 500·rebuild 가드 503. 진짜 서버 버그성 실패 0.
+  - **다음 후보(안 고침)**: 장애 중 Redis 타임아웃을 일반 500이 아니라 503으로 매핑.
+  - **다음**: ②Kafka 다운 → ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).
 
 ## 다음 작업
 
@@ -126,7 +125,7 @@
 - `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
 - 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
 
-**Phase 2 (진행 중, 2026-09-01 착수) — 실행:** test-plan.md 2번 카오스 2개(①Redis **완료** → ②Kafka 다음) → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음.
+**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 완료 2026-09-03** → ②Kafka A-2 다음) → 3번 분산락 벤치마크(선행: DB 락 timeout 수정) → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 
