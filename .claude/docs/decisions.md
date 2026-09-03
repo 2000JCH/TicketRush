@@ -53,6 +53,8 @@
 - Zookeeper는 후보에서 제외
   → ephemeral znode + ZAB 합의로 강한 일관성을 제공하지만, 3~5노드 앙상블 운영이 필요해 1개월 솔로 프로젝트에서 비용 대비 이득이 낮다고 판단.
 
+**채택 확정: Redisson RLock (2026-09-03, `test-results.md` 3번).** 300명 완전 동시 / 좌석 4개 / 전부 그룹 홀드로 벤치마크한 결과 — 오버셀 0(둘 다), 처리량 동일, Global P99 거의 동일(1,032 vs 1,018ms), 락 획득 타임아웃 0(둘 다). "20% 이내 → DB 락" tie-breaker의 근거는 "Redisson = 추가 인프라"인데 **우리는 이미 Redis를 코어로 쓰므로**(seat_status·queue·hold) 그 근거가 성립하지 않는다. 유일한 실질 차이는 DB 락이 `REQUIRES_NEW` 트랜잭션마다 HikariCP 커넥션을 점유해 300 동시에서 pending 147까지 쌓인 것(Redisson은 0). 이번 규모에선 응답시간에 안 드러났지만(풀이 빨리 순환 + 공통 병목에 묻힘), **확장 시 실패 모드가 다르다**: DB 락은 동시 인원↑ → 커넥션 대기 선형 증가 → HikariCP 획득 타임아웃(30초) 초과 시 `Connection is not available` 에러 절벽(인기 좌석 `FOR UPDATE` 경합으로 복합 악화, 풀 확장도 MySQL `max_connections` 상한). Redisson은 DB 커넥션 미사용이라 이 경로 자체가 없다. → Redisson 유지(현재 기본값). 부수 확인: 우리 홀드 액션이 HSETNX 한 번으로 짧아 락이 오래 점유되지 않고, 그래서 락 기술 선택이 성능에 큰 영향을 주지 않는다.
+
 ## 3. 인증/인가 방식
 
 - JWT 기반 (Access Token 단기만료 + Refresh Token), Role은 `BUYER` / `ORGANIZER` / `ADMIN`.

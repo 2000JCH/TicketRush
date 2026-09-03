@@ -180,41 +180,39 @@ docker exec ticketrush-kafka kafka-consumer-groups --bootstrap-server localhost:
 
 ---
 
-## 3. 분산락 벤치마크 (부하 테스트)
+## 3. 분산락 벤치마크 (부하 테스트)  ✅ 완료 (2026-09-03, test-results.md 3번 — Redisson 채택)
 
 decisions.md 2번의 채택 기준을 실제 숫자에 적용해 **Redisson RLock vs DB 비관적 락** 중 하나를 고른다.
 이 프로젝트에서 가장 강한 소재라 여기에 시간을 쓴다.
 
-### 3-1. 선행 작업 (코드, 벤치마크 전 필수)
+### 3-1. 선행 작업 (코드, 벤치마크 전 필수) — ✅ 커밋 `8570d91`
 
-`DbPessimisticLockGroupHoldLockStrategy`에 lock timeout을 `group-hold.lock-wait-millis`(현재 3,000ms)와
-같게 걸고, 타임아웃 예외를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑한다. 현재는 timeout 미지정이라 MySQL
-기본 `innodb_lock_wait_timeout`(50초) 블로킹 후 일반 500으로 새서, Redisson과 **실패 방식이 달라 공정
-비교가 안 된다** (멘토 피드백 — "바로 실패냐 몇 초 기다렸다 실패냐"가 경험을 가른다).
+`SeatRepository.findAllByIdInForUpdate`에 `lock.timeout` 힌트 3,000ms(`group-hold.lock-wait-millis`와
+동일) → `SELECT ... FOR UPDATE WAIT 3`. `DbPessimisticLockGroupHoldLockStrategy`가 락 획득 실패 예외를
+`GROUP_HOLD_LOCK_TIMEOUT`(409)으로 매핑. 이전엔 timeout 미지정이라 MySQL 기본 `innodb_lock_wait_timeout`
+(50초) 블로킹 후 일반 500으로 새서 Redisson과 실패 방식이 달랐다(멘토 피드백).
 
-### 3-2. 실행
-
-좌석 풀을 작게 잡아 경합을 만든다.
+### 3-2. 실행 — 실제로 한 것
 
 ```powershell
-powershell -File scripts/seed-load-test.ps1 -Rows 5 -SeatsPerRow 8 -BuyerCount 300   # 40석 + BUYER 300명 사전 로그인
+# 좌석 4개(경합 최대화), 대기열을 즉시 통과시켜(QUEUE_ADMIT_COUNT=1000) 좌석 홀드 시점에 경합 집중
+powershell -File scripts/seed-load-test.ps1 -Rows 1 -SeatsPerRow 4 -BuyerCount 300
 
-# (A) Redisson
-#   application.properties group-hold.lock-strategy=redis (기본) 로 백엔드 기동
+# (A) Redisson — GROUP_HOLD_LOCK_STRATEGY=redis QUEUE_ADMIT_COUNT=1000 QUEUE_ADMIT_INTERVAL=500 로 기동
 powershell -File scripts/run-gatling.ps1 -EventId <idA> -SectionId <sid> -Users 300 -GroupHoldRatio 1.0 -InjectMode atonce
 
-# (B) DB 비관적 락  — 새 이벤트로 (좌석 상태 초기화)
-#   GROUP_HOLD_LOCK_STRATEGY=db 로 백엔드 재기동
+# (B) DB 비관적 락 — GROUP_HOLD_LOCK_STRATEGY=db (나머지 동일) 로 재기동, 새 이벤트로 재시드
 powershell -File scripts/run-gatling.ps1 -EventId <idB> -SectionId <sid> -Users 300 -GroupHoldRatio 1.0 -InjectMode atonce
 ```
 
-`-InjectMode atonce`로 300명 전원을 완전 동시(같은 시각) 투입한다 — 실제 티켓 오픈 순간의 "동시 클릭"을
-가장 가깝게 재현해야 락 경합 신호가 제대로 드러난다(2026-09-01 확정, ramp로 서서히 투입하면 경합이
-약해져 두 락 방식 차이가 흐려짐). `-BuyerCount`는 이번 `-Users`(300)보다 크거나 같아야 계정이
-재사용되지 않는다.
+**주의(실행에서 배운 것)**: 처음엔 40석 + 대기열 정상 투입(`QUEUE_ADMIT_COUNT` 기본 100)으로 돌렸는데,
+대기열 입장(초당 100명)과 폴링 1초 간격 때문에 좌석 홀드 시점이 ~10초에 분산돼 **같은 좌석 쌍을 동시에
+노리는 요청이 거의 없어 락 경합이 안 생겼다**(P99 27ms, 락 타임아웃 0). 좌석 수를 4개로 줄이고
+`QUEUE_ADMIT_COUNT`를 크게 잡아 대기열을 병목에서 빼야 홀드 시점 경합이 제대로 재현된다.
 
-> **조정 여지**: 로그인 BCrypt가 락 경합 신호를 가리면, `seed-load-test.ps1`에 BUYER 계정 풀을 미리
-> 만들어 Gatling이 재사용하도록 바꾼다(가입/로그인을 매 VU마다 하지 않음).
+`-InjectMode atonce`로 300명 전원 완전 동시 투입 — 실제 오픈 순간의 "동시 클릭" 재현(2026-09-01 확정).
+`-BuyerCount`는 `-Users`(300) 이상이어야 계정이 재사용되지 않는다. 로그인 BCrypt는 `buyers.csv`
+사전 로그인으로 측정 구간에서 이미 빠져 있다.
 
 ### 3-3. 비교 지표와 판정
 
@@ -229,7 +227,13 @@ powershell -File scripts/run-gatling.ps1 -EventId <idB> -SectionId <sid> -Users 
 - 처리량과 P99가 다른 방향을 가리키면 → **P99 우선** (폭주 중 상위 1%가 몇 초씩 기다리는 쪽은 탈락)
 - 락 획득 실패/타임아웃 에러율이 한쪽에서 5%p 이상 높으면 감점
 
-**산출물**: 채택 결정 → `decisions.md` 2번 갱신, `test-results.md` 표, `aws-spec.md` B-2(RDS 스펙 확정), `portfolio.md` "분산락 벤치마크" 소재.
+**실제 판정(2026-09-03)**: 처리량·Global P99 둘 다 20% 이내(동등) → 규칙상 DB 락 방향이지만, tie-breaker의
+근거("Redisson = 추가 인프라")가 **우리는 Redis를 이미 코어로 써서 성립하지 않음**. 유일한 실질 차이인
+HikariCP pending(Redisson 0 / DB 락 147)을 "먼저 포화된 자원"으로 반영해 **Redisson 채택**. 상세는
+test-results.md 3번. Grafana 스크린샷은 두 실행이 ~15초로 짧아 표로 대체.
+
+**산출물**(완료): `decisions.md` 2번, `test-results.md` 3번, `aws-spec.md` B-2(RDS `db.m6i.large` 확정),
+`portfolio.md` 소재 7.
 
 ---
 

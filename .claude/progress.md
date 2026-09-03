@@ -105,7 +105,15 @@
   - **실행**: 클린 스택 + 새 이벤트(400석) + BUYER 400명. 총 390 VU 골든패스 + `fail-payments.ps1`(FailRatio 0.8) 병행. 좌석/웹훅 트래픽이 흐를 때 `docker stop ticketrush-kafka` → 91초 → `docker start` → `docker compose restart kafka-connect` + 커넥터 재등록.
   - **결과**: **장애 중 `payment-request` 5xx 0건 / 웹훅 5xx 0건**(계속 200 → outbox 계속 쌓임). 장애 중 PAYMENT_FAILED 16건 대기 → **복구 후 전부 SEAT_RELEASED**(outbox 239 = SEAT_RELEASED 239, 유실 0). **Consumer lag ~15초 만에 0**(커넥터 재시작 후). 장애 중 API P99 ~60ms(평상시와 동일). 오버셀 0. → **Kafka가 91초 죽어도 사용자 무영향 + 이벤트 유실 0.** Outbox 패턴이 Kafka를 critical path에서 뺀 것이 실측으로 확인됨.
   - **발견/개선 포인트**: (1) Kafka 다운 시 Debezium 커넥터가 `UNASSIGNED`로 떨어져 자동 복구 안 됨 → 수동 재시작 필요(운영이라면 Connect 헬스체크 + 자동 재시작). (2) 부하 프로파일의 `nothingFor(40s)` 공백이 장애 구간 중간에 겹침 — 다음 라운드엔 없애거나 줄일 것.
-  - **다음**: ③분산락 벤치마크(선행: DB 락 timeout 매핑) → ④한계 테스트(리허설 스택).
+
+- **2026-09-03**: **분산락 벤치마크 완료 — Redisson RLock 채택 확정. (`test-results.md` 3번, `decisions.md` 2번)**
+  - **선행 수정 커밋 `8570d91`**: `DbPessimisticLockGroupHoldLockStrategy`에 3초 lock timeout(`SeatRepository.findAllByIdInForUpdate`의 `lock.timeout` 힌트 → `FOR UPDATE WAIT 3`) + 락 획득 실패 예외를 `GROUP_HOLD_LOCK_TIMEOUT`(409)으로 매핑. 이전엔 MySQL 기본 50초 블로킹 후 일반 500이라 Redisson과 실패 방식이 달라 공정 비교 불가.
+  - **측정**: 300명 완전 동시(`atonce`) → 좌석 4개, 전부 그룹 홀드, `QUEUE_ADMIT_COUNT=1000`. A안(redis)·B안(db) 각각 새 이벤트. **처음 40석 + 대기열 정상 투입으론 홀드 시점이 분산돼 경합이 안 생겨(P99 27ms) 무효 → 좌석 축소 + 대기열 개방 재실행.**
+  - **결과**: 오버셀 0(둘 다) / 처리량 동일(238 req/s) / Global P99 거의 동일(1,032 vs 1,018ms) / 락 획득 타임아웃 0(둘 다). **유일한 차이 = HikariCP pending: Redisson 0 vs DB 락 147**(REQUIRES_NEW 트랜잭션이 커넥션 점유).
+  - **채택 = Redisson**: 성능 동등이라 원래 tie-breaker는 "DB 락(추가 인프라 불필요)"이지만, 우리는 Redis가 이미 코어라 그 근거가 안 맞음. DB 락은 부하 커지면 커넥션 고갈로 먼저 무너질 자원. → `aws-spec.md` B-2도 RDS `db.m6i.large` 확정(DB 락이었으면 `db.r6i.large` 필요), `portfolio.md` 소재 7 추가.
+  - **부수 확인**: 우리 홀드 액션이 HSETNX 한 번으로 짧아 락이 오래 안 잡혀서, 락 기술 선택이 성능에 큰 영향이 없다.
+  - Grafana 스크린샷은 생략(두 실행 다 ~15초로 짧아 pending 스파이크가 순간값으로만 잡힘 — 표로 대체, classq 부하 비교표 방식).
+  - **다음**: ④한계 테스트(리허설 스택 `docker-compose.rehearsal.yml`) → AWS 배포 → AWS 재측정.
 
 ## 다음 작업
 
@@ -131,7 +139,7 @@
 - `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
 - 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
 
-**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 / ②Kafka A-2 둘 다 완료 2026-09-03**) → **3번 분산락 벤치마크(선행: DB 락 timeout 수정) — 다음** → 4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml` 필요, 0-1번). 절차·합격 기준은 전부 test-plan.md에 있음.
+**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 / ②Kafka A-2**) + **3번 분산락 벤치마크(→ Redisson 채택) 모두 완료 2026-09-03** → **4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml`) — 다음** → AWS 배포 → AWS 재측정. 절차·합격 기준은 전부 test-plan.md에 있음.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 
@@ -210,8 +218,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 ### 시점이 정해진 결정 (해당 주차 되면 확정)
 
-- **분산락 기술**(decisions.md 2번): Redisson RLock vs DB 비관적 락(`SELECT ... FOR UPDATE`) — 두 구현은 2026-08-20에 완료(`GroupHoldLockStrategy`), 실제 채택은 **3주차 부하테스트**에서 Gatling 실측 후 채택 기준에 따라 확정. **채택 기준 2026-08-28 보강(멘토 피드백)**: 처리량뿐 아니라 그룹 홀드 P99를 동등 지표로 보고, 둘이 다른 방향이면 P99 우선. 락 실패 응답 형태(즉시/대기 후)도 관찰.
-  - **선행 수정(벤치마크 착수 전)**: `DbPessimisticLockGroupHoldLockStrategy`에 lock timeout을 Redisson `group-hold.lock-wait-millis`와 같은 수준으로 걸고, 타임아웃 예외를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑한다. 현재는 timeout 미지정이라 MySQL 기본 `innodb_lock_wait_timeout`(50초) 블로킹 후 일반 500으로 새서, Redisson 구현과 실패 방식이 달라 공정 비교가 안 된다.
+- **~~분산락 기술~~ → Redisson RLock 채택 확정 (2026-09-03)**. 벤치마크 결과: 성능 동등(처리량·Global P99), 유일 차이는 DB 락의 HikariCP pending 147(Redisson 0). 우리는 Redis가 이미 코어라 "20% 이내 → DB 락" tie-breaker의 근거가 안 맞음 + DB 락은 커넥션 고갈 리스크. 상세 `test-results.md` 3번·`decisions.md` 2번. 선행 수정(DB 락 3초 timeout + `GROUP_HOLD_LOCK_TIMEOUT` 매핑)은 커밋 `8570d91`.
 - **대기열 이탈률 섞은 부하테스트 시나리오**(decisions.md 4번, 2026-08-27 확인): 대기열 이탈자가 있어도 뒤쪽 순번이 밀리지는 않는 것은 코드로 확인됨(`EntryTokenScheduler`가 고정 인원만큼 무조건 빼고 대기열에서 제거). 다만 `queue.admit-count`가 이탈률을 고려하지 않은 고정값이라, 이탈률이 높으면 실사용자 입장 처리가 희석돼 체감 대기시간이 늘어날 수 있음 — 3주차 Gatling 부하테스트에 이탈률을 섞은 시나리오를 추가해 실측 예정
 - **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 인프라 도입 여부는 2026-08-27에 확정(decisions.md 10번, EKS/ElastiCache/MSK/CloudWatch 미도입)됐으니 실제 배포 단계에서 표를 채운다
 - **AWS 인스턴스 스펙 확정**(`.claude/docs/aws-spec.md`, 2026-08-28 신규): 계열은 m계열로 방향 확정(A·B 섹션 작성 완료 — classq는 앱 전용 c계열이지만 우리는 EC2 한 대에 Boot+Redis+Kafka+Connect+Nginx 공존이라 RAM도 병목). 잠정 `m6i.xlarge` / RDS `db.m6i.large`(DB 락 채택 시 `db.r6i.large`). 실제 크기·성능 예측·SLO(C·D·E)는 **로컬 Gatling 부하테스트 실측 후** classq와 같은 방식으로 채운다 — 아래 "성능/처리량 목표치"도 그때 함께 닫힌다

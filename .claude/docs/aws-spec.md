@@ -85,9 +85,11 @@
 | Redisson RLock 채택 | INSERT/UPDATE + binlog 읽기만 | `db.m6i.large` (2 vCPU / 8 GiB) |
 | DB 비관적 락 채택 | 위 + 그룹 홀드 `SELECT FOR UPDATE` 경합 | `db.r6i.large` (2 vCPU / 16 GiB, InnoDB 버퍼 풀 ~11 GiB) |
 
-**권장(잠정): `db.m6i.large`, 벤치마크에서 DB 락 채택 시 `db.r6i.large`로 상향**
-> InnoDB 버퍼 풀이 핵심(classq와 동일). 락 방식이 정해지기 전까지는 보수적으로 m6i.large로 두고,
-> 2번 벤치마크 결과에 맞춰 확정한다.
+**확정: `db.m6i.large` (2 vCPU / 8 GiB).** 2026-09-03 분산락 벤치마크에서 **Redisson RLock 채택**
+(decisions.md 2번, test-results.md 3번) — 그룹 홀드는 Redis 락으로 처리되고 RDS로는 `SELECT FOR UPDATE`가
+가지 않는다. 따라서 RDS 부하는 "결제 요청/웹훅 INSERT·UPDATE + binlog 읽기"뿐이라 `db.m6i.large`로 충분.
+DB 락을 채택했다면 그룹 홀드 `SELECT FOR UPDATE` 경합 + 커넥션 풀 압박(벤치마크에서 HikariCP pending 147)
+때문에 `db.r6i.large`(16 GiB)로 올려야 했다. InnoDB 버퍼 풀 여유는 D(예측)·E(실측)에서 재확인.
 
 ---
 
@@ -96,7 +98,7 @@
 | 컴포넌트 | 잠정 인스턴스 | vCPU | RAM | 확정 조건 |
 |---|---|---|---|---|
 | EC2 (Boot+Redis+Kafka+Connect+Nginx) | `m6i.xlarge` | 4 | 16 GiB | 로컬 부하테스트에서 병목축(CPU/RAM) 확인 |
-| RDS (MySQL) | `db.m6i.large` | 2 | 8 GiB | 분산락 벤치마크(decisions.md 2번) 결과. DB 락이면 `db.r6i.large` |
+| RDS (MySQL) | `db.m6i.large` | 2 | 8 GiB | ✅ 확정 — 분산락 벤치마크(2026-09-03)에서 Redisson 채택, 그룹 홀드가 RDS로 안 감 |
 
 > **"로컬 부하테스트에서 병목축 확인"은 무제한 로컬이 아니라 `docker-compose.rehearsal.yml`
 > (2026-09-01 신규)로 진행한다** — 위 표의 예산(EC2 4vCPU/16GiB, RDS 2vCPU/8GiB)을 그대로 컨테이너
