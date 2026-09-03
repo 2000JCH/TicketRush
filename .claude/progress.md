@@ -117,6 +117,55 @@
 
 ## 다음 작업
 
+### ⏭️ 이어서 할 것 (2026-09-03 저녁 — 운동 후 재개, 마감 ~09-06)
+
+**현재 위치**: Phase 2에서 A-1·A-2·분산락 벤치마크(→ Redisson 채택) 완료. **다음 = 한계 테스트 → AWS 배포 → AWS 재측정 → 포트폴리오 PDF.**
+
+**미푸시 커밋**: `8570d91`(DB 락 timeout), `74846f5`(분산락 벤치마크 문서) — 사용자가 직접 push.
+
+**스택 상태**: 벤치마크용 설정(`GROUP_HOLD_LOCK_STRATEGY=db`, `QUEUE_ADMIT_COUNT=1000`)으로 백엔드가 떠 있음 — 한계 테스트 전에 리허설 스택으로 갈아끼워야 함.
+
+#### 1. 한계 테스트 (test-plan.md 4번, ~반나절)
+- **리허설 스택**(`docker-compose.rehearsal.yml`, AWS 스펙 리소스 제한)으로 진행 — 평소 무제한 스택 아님
+- `CapacitySimulation`(계단식 주입 `incrementConcurrentUsers` 100→200→400→800…) **새로 작성 필요** — 지금 `GoldenPathSimulation`엔 없음
+- 종료 조건(test-plan.md 4-2): P95(홀드→결제) > 5,000ms / 에러율 > 5% / 오버셀 > 0 중 하나라도 걸리면 그 직전 단계가 한계치
+- 병목 관찰: HikariCP pending / Tomcat 스레드 / 로그인 BCrypt 큐 / Kafka lag → Grafana 4패널
+- 결과 → `test-results.md` 4번, `portfolio.md`(부하 테스트 소재), `aws-spec.md` C·D
+
+#### 2. AWS 배포 (test-plan.md 참고, ~1~2일, 리스크)
+AWS 설정은 **EC2 + RDS만이 아님**. 순서:
+- **접근**: IAM 사용자(또는 루트 콘솔), 키페어(.pem) — SSH용
+- **네트워크**(제일 자주 막힘): 기본 VPC + 보안그룹 2개
+  - EC2용: 인바운드 22(내 IP), 8080/80(테스트), 3000·9090(Grafana·Prometheus, 내 IP)
+  - RDS용: 인바운드 3306 = **EC2 보안그룹에서만**
+- **EC2**: `m6i.xlarge`(AL2023 또는 Ubuntu), EBS **40~50GB**(Kafka+이미지가 작은 디스크 꽉 채움), Elastic IP(선택), 접속 후 **Docker + Compose + git 설치**
+- **RDS**(Debezium 때문에 까다로움): `db.m6i.large`/MySQL 8.0/gp3 20~50GB/Multi-AZ off/퍼블릭 off
+  - **파라미터 그룹**: `binlog_format=ROW`, `binlog_row_image=FULL`
+  - 백업 활성화(binlog 켜짐) + `binlog retention hours` 설정
+  - Debezium용 유저에 `REPLICATION SLAVE`, `REPLICATION CLIENT` 권한
+  - 초기 DB `ticketrush`
+- **앱 배포**(Claude가 파일 준비, 사용자가 EC2에서 실행):
+  - `docker-compose.aws.yml` 신규 — MySQL 컨테이너 빼고 RDS 엔드포인트, 나머지(Redis/Kafka/Connect/Nginx/Prometheus/Grafana) 컨테이너 유지, 앱은 Dockerfile 빌드
+  - `.env`(RDS 접속정보 + JWT/PortOne 시크릿)
+  - Debezium 커넥터 재설정(MySQL host = RDS 엔드포인트)
+- **자주 터지는 것**: RDS binlog/replication 권한(1순위), EC2↔RDS 보안그룹, EC2 디스크·메모리(16GB에 스택 전부)
+- **역할**: Claude = `docker-compose.aws.yml` + `.env` 템플릿 + 배포 스크립트 + 단계별 체크리스트 문서 / 사용자 = AWS 콘솔 클릭 + EC2 SSH 명령 실행
+- **안전판**: AWS가 하루 넘게 꼬이면 "aws-spec.md 예측표(D)까지만 + 실배포는 마감 후"로 후퇴
+
+#### 3. AWS 재측정 (test-plan.md 5번, ~반나절)
+- AWS에서 골든패스 부하(300 동시) + 한계 테스트 **다시** (카오스는 로컬만, 재측정 안 함)
+- `aws-spec.md` D(예측) vs E(실측) 대조, `test-results.md` 5번
+
+#### 4. 포트폴리오 문서화 (~1일)
+- `test-results.md` + `portfolio.md`(소재 1~7) + `decisions.md` + `aws-spec.md` + 스크린샷(`a1-redis-down/`, `a2-kafka-down/`) → Notion → PDF (classq `정찬혁_ClassQ_포트폴리오.pdf` 참고)
+- 파일별 역할은 사용자와 이미 정리됨 (portfolio.md가 본체, test-results.md가 수치 출처)
+
+#### 5. 마무리 (여유 시)
+- `architecture.md` "인프라 구성" 표 (배포 후 채움)
+- 남은 문서 정리, 가벼운 리팩토링만 (새 기능 금지)
+
+---
+
 **진행 순서: 카오스 테스트 → 부하 테스트(분산락 최종 채택 포함) → AWS 배포**(decisions.md 13번). 카오스/부하 둘 다 로컬 Docker Compose 대상.
 
 **2026-08-28 세션에서 정리된 것(사용자 확인 완료):**
