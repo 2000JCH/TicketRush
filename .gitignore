@@ -43,8 +43,9 @@ out/
 ### Private docs (not for GitHub) ###
 .claude/portfolio.md
 
-### Generated load-test fixtures (scripts/seed-load-test.ps1 output) ###
+### Generated load-test fixtures (seed-load-test.ps1 / seed-buyers-parallel.mjs / login-buyers.mjs output) ###
 **/src/gatling/resources/data/buyers.csv
+**/src/gatling/resources/data/buyer-emails.txt
 
 ### Chaos test fault-injection timeline (scripts/chaos-*.ps1 output) ###
 scripts/chaos-timeline.log

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Gatling 로그 설정. io.gatling.gradle 플러그인 기본값은 요청이 실패(KO)하면 그 요청/응답 전문을
+  DEBUG로 덤프한다. 한계 테스트처럼 KO가 수천 건이면 출력 파일이 MB 단위로 도배되고 Gatling
+  클라이언트 자체도 느려진다. 주기적 통계(Requests 블록)는 INFO라 그대로 두고 HTTP 클라이언트
+  로그만 끈다.
+-->
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%-5level] %logger{15} - %msg%n</pattern>
+            <immediateFlush>false</immediateFlush>
+        </encoder>
+    </appender>
+
+    <logger name="io.gatling.http.engine.response" level="OFF"/>
+    <logger name="io.gatling.http.client" level="OFF"/>
+    <logger name="io.gatling.http.action" level="OFF"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
