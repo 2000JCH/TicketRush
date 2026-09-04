@@ -115,22 +115,39 @@
   - Grafana 스크린샷은 생략(두 실행 다 ~15초로 짧아 pending 스파이크가 순간값으로만 잡힘 — 표로 대체, classq 부하 비교표 방식).
   - **다음**: ④한계 테스트(리허설 스택 `docker-compose.rehearsal.yml`) → AWS 배포 → AWS 재측정.
 
+- **2026-09-04**: **한계 테스트 1차 실행 — 정합성·병목축 확정, 동시 인원 숫자는 로컬 보류. (`test-results.md` 4번)**
+  - **리허설 스택 준비에 시간 많이 씀**: 이 PC RAM 16 GiB에 원안 예산(EC2 16g + RDS 8g = 24g)이 안 들어가 축소(합 ~7 GiB, `docker-compose.rehearsal.yml` 재조정). `~/.wslconfig` 신설(`memory=8GB` + `autoMemoryReclaim=dropcache` — 없으면 Docker VM이 빌드 캐시 4 GiB를 안 돌려줘 호스트가 0.6 GiB로 굶었음). 앱 컨테이너 `TZ=Asia/Seoul`(UTC라 seed openAt와 9h 어긋나 이벤트 안 열림), `JWT_ACCESS_EXPIRATION=4h`(30분이라 대화 중 토큰 만료 → false 401), nginx `depends_on: [app]`(upstream 해석 실패로 죽음). 다른 프로젝트 컨테이너(classq `app` 크래시루프 → 8080 점유, `mysql-container` → 3306) 정지 + restart 해제.
+  - **신규 파일**: `docker-compose.capacity.yml`(nginx를 rate-limit 없는 `nginx.capacity.conf`로 교체), `CapacitySimulation.java`(계단식), `scripts/{run-capacity.ps1, seed-buyers-parallel.mjs, login-buyers.mjs}`(PowerShell seed가 3000 계정에 30분 걸려 Node 병렬로 대체), `src/gatling/resources/logback.xml`(KO 요청 DEBUG 덤프 OFF).
+  - **1차(계단식) 버림**: 계정 1개당 이벤트 1건 제한 → 800 풀이 ~50초에 소진, 뒷 단계 빈 409. 건진 것: 동시 100명에서 HikariCP 풀(10) 포화, pending 49~80.
+  - **버스트(1,500 완전 동시) 3회**: 설정·경로 바꿔가며 — 전부 **오버셀 0 / 5xx 0**. 프록시 통과분은 정상 처리.
+  - **핵심 발견: "Connection refused"는 Docker Desktop 유저랜드 포트 프록시**(Windows↔WSL2). `:8080`(앱)이든 `:8081`(nginx)이든 ~500~760/1500 동일 거부, `accept-count` 100→2000 무효(764→677). **AWS엔 없음**(앱이 진짜 리눅스에서 포트 직접 바인딩, ALB/nginx 앞단). 버스트B(nginx 경유)가 앱 직결보다 더 통과시킴이 방증.
+  - **병목축 = app CPU (2 vCPU cap, 매 버스트 197% 고정) → HikariCP/mysql**(pending 풀 크기 무관 ~160~190, mysql 1.5 vCPU가 실질 상한). → `aws-spec.md` C 병목축 = CPU 우선.
+  - **동시 인원 한계 숫자는 로컬 localhost로 못 냄** — 프록시가 ~800~1,000에서 먼저 무너짐. → AWS 재측정 또는 Gatling-in-container(`test-plan.md` 4-4)로 확정. 스크린샷 없음(버스트는 시각적 스토리 없음, 표로 충분 — 분산락과 동일).
+  - **스택 상태**: `docker compose ... down`(볼륨 유지 — 이벤트·계정 데이터 남음). 재기동 체크리스트 `test-plan.md` 4-5.
+
 ## 다음 작업
 
-### ⏭️ 이어서 할 것 (2026-09-03 저녁 — 운동 후 재개, 마감 ~09-06)
+### ⏭️ 이어서 할 것 (2026-09-04 — 외출 후 재개, 마감 ~09-06)
 
-**현재 위치**: Phase 2에서 A-1·A-2·분산락 벤치마크(→ Redisson 채택) 완료. **다음 = 한계 테스트 → AWS 배포 → AWS 재측정 → 포트폴리오 PDF.**
+**현재 위치**: 한계 테스트 1차 완료(정합성·병목축 확정). **다음 = ① 이 세션 변경분 커밋 → ② Gatling-in-container 로컬 재측정(확정) → AWS 배포 → AWS 재측정 → 포트폴리오 PDF.**
 
-**미푸시 커밋**: `8570d91`(DB 락 timeout), `74846f5`(분산락 벤치마크 문서) — 사용자가 직접 push.
+**스택 상태**: `down`(볼륨 유지 — 이벤트·계정 데이터 남음). 재기동은 `test-plan.md` 4-5 체크리스트.
 
-**스택 상태**: 벤치마크용 설정(`GROUP_HOLD_LOCK_STRATEGY=db`, `QUEUE_ADMIT_COUNT=1000`)으로 백엔드가 떠 있음 — 한계 테스트 전에 리허설 스택으로 갈아끼워야 함.
+#### 0. 먼저: 이 세션 변경분 커밋 (사용자 승인 후)
+분할 제안(커밋 메시지에 Claude 트레일러 금지 — CLAUDE.md 규칙):
+1. `feat(test): 한계 테스트 버스트 시나리오 + 병렬 계정 시더` — `CapacitySimulation.java`, `scripts/{run-capacity.ps1,seed-buyers-parallel.mjs,login-buyers.mjs}`, `src/gatling/resources/logback.xml`, `.gitignore`
+2. `chore(rehearsal): 리허설 스택을 16GiB PC 예산으로 축소 + 한계 테스트 오버레이` — `docker-compose.rehearsal.yml`(수정), `docker-compose.capacity.yml`·`nginx/nginx.capacity.conf`(신규)
+3. `docs: 한계 테스트 1차 결과 + 재기동 체크리스트` — `test-results.md`·`test-plan.md`·`progress.md`·`CLAUDE.md`·`aws-spec.md`·`portfolio.md`
+- `~/.wslconfig`는 저장소 밖(머신 설정) — 커밋 안 함. 내용은 `test-plan.md` 4-5에 기록됨.
+- push는 사용자가 직접.
 
-#### 1. 한계 테스트 (test-plan.md 4번, ~반나절)
-- **리허설 스택**(`docker-compose.rehearsal.yml`, AWS 스펙 리소스 제한)으로 진행 — 평소 무제한 스택 아님
-- `CapacitySimulation`(계단식 주입 `incrementConcurrentUsers` 100→200→400→800…) **새로 작성 필요** — 지금 `GoldenPathSimulation`엔 없음
-- 종료 조건(test-plan.md 4-2): P95(홀드→결제) > 5,000ms / 에러율 > 5% / 오버셀 > 0 중 하나라도 걸리면 그 직전 단계가 한계치
-- 병목 관찰: HikariCP pending / Tomcat 스레드 / 로그인 BCrypt 큐 / Kafka lag → Grafana 4패널
-- 결과 → `test-results.md` 4번, `portfolio.md`(부하 테스트 소재), `aws-spec.md` C·D
+#### 1. Gatling-in-container 로컬 재측정 (확정, ~30분·공짜)
+- **왜**: 버스트 4회가 전부 Docker 포트 프록시(~760 거부)에 막혀 **앱 자체의 동시접속 한계 숫자를 못 냄**. Gatling을 컨테이너 네트워크에 넣어 `app:8080`/`nginx:80` 직접 쳐서 프록시 우회. 알아볼 것: (a) 앱의 실제 동시접속 천장(축소 스펙), (b) 프록시가 가리던 앱 문제 유무(뻗나/메모리 새나), (c) AWS와 비교할 로컬 기준선. 문제 나오면 AWS 요금 나가기 전 로컬에서 무료로 수정.
+- **방법**: `test-plan.md` 4-4 레시피 (`docker-compose.capacity.yml`에 `gatling` 서비스 추가, `-DbaseUrl=http://nginx:80`). Gatling 컨테이너 `cpus`는 앱 예산과 분리.
+- 종료 조건은 test-plan.md 4-2. 병목 관찰(app CPU / HikariCP / mysql CPU / 호스트 메모리).
+- **Grafana 4패널 캡쳐** → `.claude/screenshots/tests/capacity/` (이 런은 찍을 가치 있음)
+- 결과 → `test-results.md` 4번 표 채우기, `portfolio.md` 소재 8, `aws-spec.md` C·D
+- **HikariCP는 10 유지**(기본값) — 1차에서 10→20이 효과 없었음(mysql CPU가 벽). AWS 재측정에서 10 vs 20 비교로 확인만.
 
 #### 2. AWS 배포 (test-plan.md 참고, ~1~2일, 리스크)
 AWS 설정은 **EC2 + RDS만이 아님**. 순서:
@@ -146,6 +163,8 @@ AWS 설정은 **EC2 + RDS만이 아님**. 순서:
   - 초기 DB `ticketrush`
 - **앱 배포**(Claude가 파일 준비, 사용자가 EC2에서 실행):
   - `docker-compose.aws.yml` 신규 — MySQL 컨테이너 빼고 RDS 엔드포인트, 나머지(Redis/Kafka/Connect/Nginx/Prometheus/Grafana) 컨테이너 유지, 앱은 Dockerfile 빌드
+  - **앱 env에 반드시**: `TZ=Asia/Seoul`(EC2 기본 UTC → openAt 9h 어긋남), `HIKARI_POOL`·`TOMCAT_ACCEPT`(한계 테스트에서 나온 튜닝, `aws-spec.md` C-1 — AWS 재측정에서 10 vs 30 비교). `JWT_ACCESS_EXPIRATION`은 운영 기본(30분)으로 되돌림(4h는 리허설 전용).
+  - nginx는 `nginx.rehearsal.conf` 계열(upstream `app:8080`) 사용 — 단, AWS는 rate limit 유지(리허설의 `capacity.conf`는 로컬 테스트 전용)
   - `.env`(RDS 접속정보 + JWT/PortOne 시크릿)
   - Debezium 커넥터 재설정(MySQL host = RDS 엔드포인트)
 - **자주 터지는 것**: RDS binlog/replication 권한(1순위), EC2↔RDS 보안그룹, EC2 디스크·메모리(16GB에 스택 전부)

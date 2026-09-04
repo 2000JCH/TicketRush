@@ -93,17 +93,39 @@ DB 락을 채택했다면 그룹 홀드 `SELECT FOR UPDATE` 경합 + 커넥션 �
 
 ---
 
-## C. 컴포넌트별 권장 스펙 요약 (잠정 — 부하테스트 후 확정)
+## C. 컴포넌트별 권장 스펙 요약
 
-| 컴포넌트 | 잠정 인스턴스 | vCPU | RAM | 확정 조건 |
+| 컴포넌트 | 인스턴스 | vCPU | RAM | 상태 |
 |---|---|---|---|---|
-| EC2 (Boot+Redis+Kafka+Connect+Nginx) | `m6i.xlarge` | 4 | 16 GiB | 로컬 부하테스트에서 병목축(CPU/RAM) 확인 |
-| RDS (MySQL) | `db.m6i.large` | 2 | 8 GiB | ✅ 확정 — 분산락 벤치마크(2026-09-03)에서 Redisson 채택, 그룹 홀드가 RDS로 안 감 |
+| EC2 (Boot+Redis+Kafka+Connect+Nginx) | `m6i.xlarge` | 4 | 16 GiB | **방향 확정** — 병목축 = CPU (한계 테스트 1차). 크기 미세조정은 AWS 재측정(E) |
+| RDS (MySQL) | `db.m6i.large` | 2 | 8 GiB | ✅ 확정 — 분산락 벤치마크(2026-09-03) Redisson 채택 |
 
-> **"로컬 부하테스트에서 병목축 확인"은 무제한 로컬이 아니라 `docker-compose.rehearsal.yml`
-> (2026-09-01 신규)로 진행한다** — 위 표의 예산(EC2 4vCPU/16GiB, RDS 2vCPU/8GiB)을 그대로 컨테이너
-> 리소스 제한으로 걸어서, 4번 한계 테스트를 이 조건에서 돌리고 Grafana로 CPU/RAM 중 무엇이 먼저
-> 포화되는지 관찰해 계열·크기를 확정한다(decisions.md 10번, `test-plan.md` 0-1·4번).
+**병목축 = CPU (한계 테스트 1차, 2026-09-04, `test-results.md` 4번)**:
+- 축소 리허설(app 2 vCPU / 2400m)에서 1,500명 버스트 시 **app CPU가 매번 2코어 cap(197%)에 붙었다.**
+  RAM은 여유 있었음(app heap ~1 GiB / limit 2400m). HikariCP pending은 풀 크기(10·20) 무관하게 ~160~190
+  — 그 뒤의 mysql 1.5 vCPU가 실질 상한. → **CPU가 1순위 병목, DB(CPU/커넥션)가 2순위.**
+- 따라서 vCPU:RAM 1:4 m계열 + vCPU를 넉넉히(`m6i.xlarge` 4 vCPU) 방향이 맞다. RAM 병목이 아니므로
+  `r` 계열은 불필요. 부하가 CPU에 더 몰리면 `m6i.2xlarge`(8 vCPU)가 scale-up 후보.
+- **로컬 한계 숫자(동시 N명)는 못 냈다** — Docker Desktop 포트 프록시(Windows↔WSL2 유저랜드 프록시)가
+  ~800~1,000 동시 연결에서 먼저 RST를 뱉는다. `server.tomcat.accept-count`를 100→2000으로 올려도
+  무효(연결이 컨테이너에 닿기 전에 죽음). **AWS엔 이 계층이 없다** — 앱이 리눅스 커널에 포트 직접 바인딩
+  + ALB/nginx 앞단. 그래서 한계 동시 사용자 수는 D(예측)·E(AWS 실측)에서 처음으로 실제 값이 나온다.
+
+### C-1. 배포 시 반영할 튜닝 (한계 테스트에서 나온 것)
+
+| 항목 | 값 | 근거 / 상태 |
+|---|---|---|
+| `spring.datasource.hikari.maximum-pool-size` | **10 유지 (기본값)** | 버스트 시 pending 160~190이었지만, 10→20으로 올려도 pending이 안 줄었다 — 뒤의 mysql CPU가 벽이라 풀 크기가 레버가 아님. HikariCP 공식 가이드도 "풀은 작게"(2 vCPU DB면 4~10 적정). **AWS 재측정에서 10 vs 20 한 번 비교**해 이 결론(풀 크기 무관, DB CPU가 병목)을 확인만 한다 |
+| `server.tomcat.accept-count` | 100 → **미정 (AWS에서 검증)** | 버스트 시 기본 100은 작아 보이나, 로컬에선 Docker 프록시에 가려 100→2000 효과를 검증 못 했다. AWS(프록시 없음)에서 실제로 필요한지 + 적정값 확인 |
+| `TZ` / `-Duser.timezone` | **`Asia/Seoul`** ✅ | 앱이 `openAt` 등을 zone 없는 `LocalDateTime`으로 다룸. EC2 기본 UTC면 KST 기준 데이터와 9h 어긋남 — 이건 확정 반영 |
+
+→ 리허설에선 `docker-compose.rehearsal.yml`의 env(`HIKARI_POOL`/`TOMCAT_ACCEPT`/`TZ`)로 실험 전환.
+`TZ` 외에는 `application.properties` 기본값을 건드리지 않는다 — AWS 재측정으로 확정된 뒤에만 승격.
+
+> **로컬 리허설은 `docker-compose.rehearsal.yml` + `docker-compose.capacity.yml`로 진행한다.** 원안은
+> EC2 4vCPU/16GiB + RDS 2vCPU/8GiB를 그대로 흉내냈으나 이 개발 PC가 RAM 16 GiB뿐이라 합 24 GiB가
+> 안 들어가 축소했다(합 ~7 GiB, `test-results.md` 4-0). "노트북 성능이 아니라 EC2 성능"이라는 원래
+> 취지는 병목축 판별(CPU vs RAM)까지는 유효하고, 절대 수치는 AWS 재측정에서 확정한다.
 
 ---
 

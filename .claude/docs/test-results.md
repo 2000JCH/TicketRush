@@ -119,19 +119,57 @@
 
 ---
 
-## 4. 한계 테스트 — 동시 몇 명까지
+## 4. 한계 테스트 — 동시 몇 명까지 (1차: 2026-09-04)
 
-> 계획: `test-plan.md` 4번. 계단식 부하로 종료 조건(P95>5s / 에러율>5% / 오버셀>0)에 걸리는 직전 단계.
+> 계획: `test-plan.md` 4번. **측정 환경이 0번과 다르다** — 리허설 스택(`docker-compose.rehearsal.yml`
+> + `docker-compose.capacity.yml`, AWS 축소 스펙 리소스 제한), 앱도 컨테이너(`Dockerfile`).
 
-| 단계 (동시) | 처리량 | P95 (홀드→결제) | 에러율 | 오버셀 | HikariCP pending | 비고 |
-|---|---|---|---|---|---|---|
-| 100 | *(대기)* | | | | | |
-| 200 | *(대기)* | | | | | |
-| 400 | *(대기)* | | | | | |
-| … | | | | | | |
+### 4-0. 측정 환경
 
-**한계치(로컬)**: 동시 *(대기)* 명
-**그때의 병목**: *(대기)*
+| 항목 | 값 |
+|---|---|
+| 측정 일자 | 2026-09-04 (커밋: 이 세션, `8f4215a` 이후 미커밋 상태에서 측정) |
+| 하드웨어 | 이 세션 PC (RAM 16 GiB) — **section 0의 5600 머신과 다름** |
+| Docker Desktop VM | `~/.wslconfig` `memory=8GB` + `autoMemoryReclaim=dropcache` (신규 — 없으면 VM이 스택 캐시를 안 돌려줘 호스트가 굶음) |
+| 리허설 예산 | app 2 vCPU / 2400m · mysql 1.5 vCPU / 2200m · kafka 0.75/800m · connect 0.5/560m · redis 0.5/300m · nginx 0.5/160m (합 ~7 GiB — 이 PC 16 GiB에 맞춰 원안 24 GiB에서 축소) |
+| 부하 시나리오 | 1차 계단식은 `CapacitySimulation`(closed model), 버스트는 `GoldenPathSimulation -InjectMode atonce` |
+| 계정 풀 | `seed-buyers-parallel.mjs` / `login-buyers.mjs`로 3,000~6,000 BUYER 사전 로그인 (JWT_ACCESS_EXPIRATION=4h로 리허설 중 만료 방지) |
+
+### 4-1. 계단식 1차 (버림 — 설계 결함)
+
+`CapacitySimulation -Mode double -Max 800` (동시 100→200→400→800, 각 30초). **결과는 못 씀:**
+이 시스템은 계정 1개당 이벤트 1건만 진행(`PAYMENT_REQUESTED` → `ACTIVE_RESERVATION_EXISTS`) → **800 계정이 ~50초에 소진**되어 이후 단계는 대부분 빈 409 hold + 대기열 폴링. 고부하가 실제로 안 만들어졌다.
+
+- 47,050 요청 / KO 116 (0.25%, 전부 계정·좌석 소진에 따른 404·409) / **오버셀 0 / 5xx 0**
+- **건진 것**: 동시 100명(정상 여정)에서 이미 **HikariCP 풀(기본 10) 포화, pending 49~80**. 400 구간 pending 189. → 병목이 DB 커넥션 풀.
+- → 방식을 "버스트"(N명 완전 동시, 각자 1회)로 전환.
+
+### 4-2. 버스트 (1,500명 완전 동시, `atonce`)
+
+| 런 | 설정 | 경로 | queue-enter OK/KO | seat-hold OK | payment OK/KO | Global P95 / P99 | 오버셀 | 5xx |
+|---|---|---|---|---|---|---|---|---|
+| **버스트1** | HikariCP 10, accept 100 | `:8080` 앱 직결 | 736 / **764** (Conn refused) | 737 | 691 / 0 | 5,495 / 9,434 ms | **0** | **0** |
+| **버스트A** | HikariCP 20, accept 2000 | `:8080` 앱 직결 | 823 / **677** (Conn refused) | 823 | 780 / 0 | 3,827 / 7,810 ms | **0** | **0** |
+| **버스트B** | HikariCP 20, accept 2000 | `:8081` **nginx 경유** | 998 / **502** (Conn refused) | 1,245 | 898 / 134 (404) | 15,090 / 18,126 ms¹ | **0** | **0** |
+
+¹ 버스트B의 높은 P95/P99는 앱 지연이 아니라 (1) 통과 인원이 많아 대기열이 ~1,000 깊이로 쌓여 폴링 대기가 길어진 것 + (2) Gatling이 Conn-refused를 30회 재시도한 시간. 앱 자체 5xx·오버셀은 0.
+
+**버스트 중 리소스**(버스트A 모니터): app CPU **~197%** (2코어 cap에 붙음, 매 버스트 동일) / HikariCP active 20/20 · **pending 156~169** (풀을 10→20으로 올려도 pending은 ~160대 — mysql 1.5 vCPU가 뒤에서 못 따라옴) / 호스트 여유 메모리 최저 **375 MB**(버스트B, 스왑 직전까지 감).
+
+### 4-3. 핵심 결론
+
+1. **"Connection refused"는 TicketRush가 아니라 Docker Desktop의 유저랜드 포트 프록시다.**
+   - `:8080`(앱)이든 `:8081`(nginx)이든 1,500 동시 연결 중 ~500~760개가 똑같이 거부됨
+   - `server.tomcat.accept-count` 100→2000으로 올려도 거의 무변화 (764 → 677) — Tomcat 수용 큐는 컨테이너 **안**에 있고, 연결은 그 앞(Windows↔WSL2 프록시)에서 죽음
+   - `localhost:포트` → Windows 프록시 프로세스 → WSL2 VM → 컨테이너. 이 프록시 하나가 커넥션 스톰을 못 받아 RST
+   - **AWS엔 없다** — 앱이 진짜 리눅스에서 포트 직접 바인딩, ALB/nginx가 앞단. 버스트B(nginx 경유)가 앱 직결보다 더 많이 통과시킨 것도 방증(앱은 한 번도 연결 거부 안 함)
+2. **정합성은 완벽하다.** 계단식 + 버스트 3회, 어떤 조건에서도 **오버셀 0 / 5xx 0**. 프록시를 통과한 요청은 전부 정상 처리 (버스트B: 좌석 홀드 1,245건 전원 성공, 결제 898건 성공).
+3. **앱의 병목축 = CPU → DB CPU.** 모든 버스트에서 app CPU가 2코어 cap(197%)에 붙었고, HikariCP pending은 **풀을 10→20으로 올려도 ~160~190 그대로** — 풀 크기가 레버가 아니라 그 뒤 mysql CPU(1.5 vCPU)가 실질 상한이라는 뜻. → `aws-spec.md` C의 "병목축" = **CPU 우선**. HikariCP는 기본값 10 유지(공식 가이드도 "풀은 작게"), AWS 재측정에서 10 vs 20 비교로 이 결론만 확인. AWS `m6i.xlarge`(4 vCPU) + `db.m6i.large`(2 vCPU 전용)에서 완화 예상.
+4. **payment 404 (버스트B 134건)**: `ACTIVE_HOLD_NOT_FOUND` 계열 — 대기열이 깊어 seat-hold ~ payment 사이 지연이 커지며 홀드가 스케줄러에 스윕된 것으로 추정. 5xx 아님, 정합성엔 영향 없음(오버셀 0). 재현 시 원인 확정 필요.
+
+**한계치(로컬)**: **localhost 기반 Gatling으로는 못 냄** — Docker 프록시가 ~800~1,000 동시 연결에서 먼저 무너짐(테스트 환경 한계, decisions.md에 기록 예정). 프록시를 통과한 범위에서는 앱이 CPU-bound로 버텼고 correctness 무손상.
+**그때의 병목**: 앱 CPU (2 vCPU) → HikariCP/mysql.
+**진짜 숫자**: (a) AWS 재측정(section 5, 프록시 없음) 또는 (b) Gatling을 컨테이너 안에서 실행(`test-plan.md` 4-4). 둘 중 하나로 확정.
 
 ---
 

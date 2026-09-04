@@ -239,33 +239,87 @@ test-results.md 3번. Grafana 스크린샷은 두 실행이 ~15초로 짧아 표
 
 ## 4. 한계 테스트 (동시 몇 명까지 버티나)
 
-> **0-1번 리허설 스택으로 진행한다.** 평소 로컬(무제한)로 돌리면 "이 PC가 몇 명 버티나"만 재는
-> 것이라 AWS 배포 판단에 못 쓴다 — `docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml
-> up -d --build` 로 띄우고 baseUrl은 `http://localhost:8081`(Nginx 경유).
+> **1차 실행 완료 2026-09-04** — `test-results.md` 4번. 요약: **정합성·병목축은 확정, 동시 인원
+> 한계 숫자는 로컬 localhost로는 못 냄**(Docker Desktop 포트 프록시가 ~800~1,000 연결에서 먼저
+> 무너짐). 진짜 숫자는 4-4(Gatling-in-container) 또는 section 5(AWS 재측정)로 확정한다.
 
-2번·3번은 고정 부하다. 이 테스트는 **부러질 때까지 밀어서 한계 동시 사용자 수를 찾는다** — "우리 시스템은
-동시 N명까지 버틴다"는 문장이 포트폴리오의 핵심 수치가 된다.
+### 4-1. 방식 (1차에서 확정된 것)
 
-### 4-1. 방법
+- **계단식(`incrementConcurrentUsers`)은 이 시스템에 안 맞는다.** 계정 1개당 이벤트 1건만 진행
+  가능(`ACTIVE_RESERVATION_EXISTS`) → 계정 풀이 ~50초에 소진되어 뒷 단계가 빈 409가 된다.
+- **버스트 모델을 쓴다**: `GoldenPathSimulation -InjectMode atonce -Users N` — N명이 오픈 순간처럼
+  완전 동시에 몰리고 각자 딱 1회 여정. 대기열이 100명/초로 메터링하는 걸 감당하나 + 대기자 전원의
+  1초 폴링 부하를 견디나를 본다. N을 키워가며 종료 조건(4-2)에 걸리는 지점을 찾는다.
+- **계정·좌석은 N보다 넉넉히**: 좌석 ≥ N×1.5, 계정 ≥ N. (`CapacitySimulation.java`는 계단식용으로
+  남겨둠 — AWS 재측정에서 프록시 없이 다시 쓸 수 있음.)
 
-Gatling 계단식 주입으로 동시 사용자를 단계적으로 올린다: 예) 100 → 200 → 400 → 800 …, 각 단계 60초 유지.
-`GoldenPathSimulation`에 `-Dmode=capacity` 주입 프로파일을 추가하거나 별도 `CapacitySimulation`을 만든다
-(`incrementConcurrentUsers(...).times(...).eachLevelLasting(...)`).
-
-### 4-2. 종료 조건 (셋 중 하나라도 걸리면 그 직전 단계가 한계치)
+### 4-2. 종료 조건 (셋 중 하나라도 → 그 직전 N이 한계치)
 
 | 조건 | 임계 |
 |---|---|
-| P95 (홀드→결제) | > 5,000ms (목표 2초의 2.5배 — "느리지만 아직 응답은 옴"의 끝) |
-| 에러율 (5xx + 락 타임아웃) | > 5% |
-| 오버셀 | 1건이라도 발생 (정합성이 깨지는 순간 = 진짜 한계) |
+| P95 (홀드→결제, 서버측 Prometheus) | > 5,000ms |
+| 에러율 (5xx + 락 타임아웃, **경합 409·404 제외**) | > 5% |
+| 오버셀 | 1건이라도 |
 
-### 4-3. 관찰 포인트
+### 4-3. 1차 결과 요약 (상세는 test-results.md 4번)
 
-- 먼저 무엇이 포화되는가: HikariCP `pending`(DB 커넥션 대기)? Tomcat 스레드? 로그인 BCrypt 큐? Kafka lag?
-  → Grafana 4패널로 병목 지점을 특정 (classq는 스레드 풀 큐잉이 P95의 주원인이었음)
-- 한계치와 그때의 병목 → `test-results.md` + `portfolio.md`. AWS 배포 후 같은 테스트로 한계치가 얼마나
-  올라가는지도 비교.
+- 계단식(버림) + 버스트 1,500명 × 3회(설정·경로 바꿔가며): **오버셀 0 / 5xx 0** (전부).
+- **"Connection refused"의 정체 = Docker Desktop 유저랜드 포트 프록시** (Windows↔WSL2). `:8080`(앱)이든
+  `:8081`(nginx)이든 ~500~760/1500 동일하게 거부, `accept-count` 100→2000도 무효. **AWS엔 없다.**
+- 병목축: **app CPU (2 vCPU cap, 매 버스트 197% 고정) → HikariCP/mysql**. pending은 풀 10·20 무관 ~160~190.
+- → `aws-spec.md` C: 병목축 = CPU 우선. `m6i.xlarge`(4 vCPU) + `db.m6i.large`에서 완화 예상.
+
+### 4-4. 로컬에서 진짜 숫자를 내는 법 (선택 — Gatling in container)
+
+Docker 포트 프록시를 우회하려면 Gatling도 컨테이너 네트워크 안에서 돌려 `app:8080` / `nginx:80`을
+직접 친다. 레시피(미실행, 필요 시):
+1. `docker-compose.capacity.yml`에 `gatling` 서비스 추가 — `image: eclipse-temurin:21-jdk`, 소스·gradle
+   마운트, `command: ./gradlew gatlingRun --simulation simulation.GoldenPathSimulation -DbaseUrl=http://nginx:80 ...`,
+   `network` 공유. 또는 공식 `denvazh/gatling` 이미지 + 시뮬레이션 마운트.
+2. `-DbaseUrl=http://nginx:80` (컨테이너 서비스명) 또는 `http://app:8080`.
+3. 나머지(계정 시드, 종료 조건, 모니터)는 동일.
+- 주의: Gatling 컨테이너도 리허설 예산 안에서 CPU를 나눠 먹으므로 `cpus`를 따로 잡고 앱 예산과 분리.
+
+### 4-5. 다음 세션 빠른 재기동 체크리스트 (설정에 시간 날리지 않도록)
+
+**이미 되어 있는 것** (건드리지 말 것):
+- `~/.wslconfig` (`memory=8GB`, `processors=8`, `[experimental] autoMemoryReclaim=dropcache`) — 있으면
+  Docker VM이 캐시를 안 물고 있어 호스트가 안 굶는다. 없으면 부하 테스트 중 스왑.
+- `docker-compose.rehearsal.yml` — 이 PC(16 GiB)에 맞춘 축소 예산 + `TZ=Asia/Seoul` +
+  `JWT_ACCESS_EXPIRATION=14400000`(4h) + HikariCP/Tomcat 튜닝 노브(`HIKARI_POOL`/`TOMCAT_ACCEPT` env).
+- `docker-compose.capacity.yml` — nginx를 rate-limit 없는 `nginx.capacity.conf`로 교체(한계 테스트 전용).
+- 스크립트: `seed-buyers-parallel.mjs`(신규 계정+로그인, 병렬), `login-buyers.mjs`(기존 계정 토큰만 갱신,
+  `buyer-emails.txt` 읽음 — PowerShell `seed-load-test.ps1`의 순차 시드는 이 PC에서 3000개에 30분 걸려 못 씀),
+  `run-capacity.ps1`(계단식), `run-gatling.ps1`(버스트: `-InjectMode atonce`).
+
+**재기동 순서** (mysql/redis 볼륨을 지우지 않았다면 이벤트·계정 데이터가 남아 있음):
+```powershell
+# 1. 스택 (앱 이미지 빌드 캐시 있으면 ~1분). HikariCP는 기본 10 유지 — env 미지정.
+#    풀 크기 실험을 다시 할 때만 HIKARI_POOL=20 을 앞에 붙인다.
+docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml -f docker-compose.capacity.yml up -d --build
+# 2. 앱 헬스 대기: curl http://localhost:8080/actuator/health  → 200
+# 3. 포트 충돌 시: 다른 프로젝트 컨테이너(classq `app`, `mysql-container`)가 8080/3306을 쥐고 있을 수 있음
+#    → docker update --restart=no <name> ; docker stop <name>   (이번 세션에 이미 정지·restart 해제해둠)
+# 4. 이벤트 새로 필요하면 node 인라인 스크립트로 생성 (openAt는 KST로: Date.now()+30s+9h)
+#    또는 seed-load-test.ps1 -BuyerCount 0 회피하고 이벤트만 만드는 방법 사용
+# 5. 토큰 갱신 (계정이 이미 있으면): node scripts/login-buyers.mjs 3200   (~100초)
+#    계정이 없으면:                  node scripts/seed-buyers-parallel.mjs 3000
+# 6. 버스트: powershell -File scripts/run-gatling.ps1 -EventId <id> -SectionId <sid> -Users 1500 -InjectMode atonce -BaseUrl http://localhost:8081
+# 7. 모니터: scratchpad burstmon.sh 패턴 (host avail / docker stats / hikari / prometheus P95)
+```
+
+**함정 모음** (이번 세션에 겪은 것):
+- 앱 컨테이너 기본 TZ가 UTC → seed의 openAt(KST)와 9시간 어긋나 이벤트가 안 열림 → `TZ=Asia/Seoul` 필수(반영됨).
+- JWT 30분이라 세션 대화 중 토큰 만료 → false 401 폭탄 → `JWT_ACCESS_EXPIRATION=4h`(반영됨).
+- nginx.rehearsal.conf는 `upstream app:8080`을 기동 시 1회 해석 → app보다 먼저 뜨면 죽음 → `depends_on: [app]`(반영됨).
+- Gatling 플러그인 기본 logback이 KO마다 요청 전문을 DEBUG 덤프 → 출력 파일 MB급 → `src/gatling/resources/logback.xml`로 http 클라이언트 로그 OFF(반영됨).
+- PowerShell에서 `-File scripts\x.ps1`의 백슬래시가 Git Bash에서 먹힘 → 절대경로 + 슬래시로.
+
+### 4-6. 관찰 포인트
+
+- HikariCP `pending` / Tomcat `busy` / app CPU% / 호스트 여유 메모리(스왑 감시, < 500 MB면 중단) / Kafka lag.
+- Grafana 4패널(`ticketrush-load`) — 단, 부하 중 `/actuator/prometheus` 스크레이프가 타임아웃날 수 있어
+  (앱 CPU 포화) 시계열에 구멍이 생긴다. 수치는 Prometheus API 직접 쿼리로 보완.
 
 ---
 
