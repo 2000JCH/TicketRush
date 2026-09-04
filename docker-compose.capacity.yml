@@ -1,0 +1,14 @@
+# 한계 테스트 전용 오버레이 — docker-compose.rehearsal.yml 위에 추가로 얹는다.
+#   docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml -f docker-compose.capacity.yml up -d
+#
+# nginx를 rate-limit 없는 nginx.capacity.conf로 바꾸고 커넥션 수용량을 키운다 — 단일 호스트에서
+# 수천 연결을 한꺼번에 던지는 한계 테스트에서 (1) per-IP rate limit이 전부를 429로 막는 것과
+# (2) Docker Desktop 포트 프록시(localhost:8080 직결)가 병목이 되는 것 둘 다 피하기 위함.
+# Gatling은 -DbaseUrl=http://localhost:8081 (nginx 경유)로 실행한다.
+
+services:
+  nginx:
+    volumes: !override
+      - ./nginx/nginx.capacity.conf:/etc/nginx/nginx.conf:ro
+    cpus: 0.5
+    mem_limit: 160m

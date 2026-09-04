@@ -1,41 +1,74 @@
-# AWS EC2(m6i.xlarge, 4 vCPU/16 GiB, aws-spec.md B-1) + RDS(db.m6i.large, 2 vCPU/8 GiB, aws-spec.md
-# B-2) 스펙을 로컬에서 흉내내는 리허설 오버레이. 평소 개발(docker-compose.yml 단독)에는 영향 없음 —
-# 부하 테스트 4번(한계 테스트) 전, AWS에 실제로 돈을 태우기 전에 같은 리소스 예산으로 먼저 재현해
-# "노트북 성능"이 아니라 "EC2 성능"에 가까운 숫자로 한계치를 찾기 위함.
+# AWS 배포 전 로컬 리허설 오버레이 — AWS 스펙 방향(EC2 m 계열 + RDS)을 리소스 제한으로 흉내낸다.
+# 평소 개발(docker-compose.yml 단독)에는 전혀 영향 없음.
 #
 # 사용법:
 #   docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml up -d --build
-#   (평소처럼 gradlew bootRun을 쓰지 않는다 — app이 여기서 컨테이너로 함께 뜬다)
-#   powershell -File scripts\register-outbox-connector.ps1   (컨테이너 재기동마다 새로 등록 필요)
-#   Gatling은 -DbaseUrl=http://localhost:8081 (nginx 경유, 실제 트래픽 경로와 동일하게)
+#   powershell -File scripts\register-outbox-connector.ps1   (컨테이너 재기동마다 재등록)
+#   한계 테스트 Gatling은 -DbaseUrl=http://localhost:8080 (앱 컨테이너 직접 — 아래 [nginx] 참고)
 #
-# EC2 예산(4 vCPU / 16 GiB)을 app+redis+kafka+kafka-connect+nginx가 나눠 쓰고, RDS 예산은 mysql이
-# 별도로 쓴다 — 실제로도 RDS는 EC2와 물리적으로 분리된 컴퓨트라 같은 예산을 나누지 않기 때문.
-# 분산락 벤치마크에서 DB 락이 채택되면 RDS는 db.r6i.large(2 vCPU/16 GiB)로 올라간다(aws-spec.md
-# B-2) — 그 경우 mem_limit을 16g로 바꿔서 재리허설한다.
+# ── 예산 (2026-09-04 재조정) ─────────────────────────────────────────────────
+# 원안은 EC2 m6i.xlarge(4 vCPU/16 GiB) + RDS db.m6i.large(2 vCPU/8 GiB)를 그대로 흉내냈으나
+# (합 24 GiB 상당), 실측 착수 시점에 **이 개발 PC가 물리 RAM 16 GiB뿐**이라 그 예산이 실제로는
+# 돌아갈 수 없다는 걸 발견했다(2026-09-01의 "검증 완료"는 idle 기동까지였고, 부하를 걸면 호스트
+# 스왑으로 "노트북 한계"를 재게 된다). Docker Desktop WSL2 VM을 9 GiB로 올리고(~/.wslconfig),
+# 그 안에 들어오도록 예산을 축소했다:
+#
+#   app            2.0 vCPU / 2400m   (MaxRAMPercentage 70% → heap ~1680m)
+#   mysql          1.5 vCPU / 2200m
+#   kafka          1.0 vCPU / 1100m   (KAFKA_HEAP_OPTS로 heap 600m 고정 — 한계 테스트 중 idle)
+#   kafka-connect  0.5 vCPU /  800m   (heap 448m 고정 — golden path는 outbox를 안 태워 idle)
+#   redis          0.5 vCPU /  300m
+#   nginx         0.25 vCPU /   96m
+#   prometheus/grafana        각 350m (관찰 도구, AWS 박스 구성요소는 아님)
+#   합계 ≈ 7.6 GiB (VM 8.7 GiB 안, 커널/페이지캐시 여유 ~1 GiB)
+#
+# → 이 축소본은 특정 AWS 인스턴스와 1:1 대응이 아니라 "작은 사양 언저리(대략 m6i.large +
+#   db.t3.medium 방향)에서 동시 몇 명까지 버티나"를 보는 용도다. 정확한 검증은 AWS 실배포 후
+#   재측정(test-plan.md 5번). aws-spec.md B/C의 최종 크기도 그 재측정으로 닫는다.
+#
+# [nginx] 한계 테스트는 nginx를 경유하지 않고 app:8080으로 직접 넣는다 — nginx.rehearsal.conf의
+#   대기열 진입 rate limit(5r/s per IP)이 단일 호스트에서 나오는 부하를 전부 429로 막아, 앱 스택의
+#   한계가 아니라 nginx 설정을 측정하게 되기 때문. nginx rate limit 자체는 카오스 A-1 시점에 별도
+#   검증됨. nginx는 스택에 함께 떠 있되 측정 경로에서만 뺀다.
 
 services:
   mysql:
-    cpus: 2.0
-    mem_limit: 8g
+    cpus: 1.5
+    mem_limit: 2200m
 
   redis:
-    cpus: 0.25
-    mem_limit: 1g
+    cpus: 0.5
+    mem_limit: 300m
 
+  # 한계 테스트(golden path)는 Kafka 경로를 전혀 안 태운다(outbox는 markPaymentFailed에서만) —
+  # kafka/connect는 살아만 있으면 되므로 heap을 바짝 조여 호스트 RAM 여유를 확보한다.
   kafka:
-    cpus: 1.0
-    mem_limit: 4g
+    cpus: 0.75
+    mem_limit: 800m
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx420m -Xms256m"
 
   kafka-connect:
     cpus: 0.5
-    mem_limit: 2g
+    mem_limit: 560m
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx320m -Xms192m"
 
   nginx:
     volumes: !override
       - ./nginx/nginx.rehearsal.conf:/etc/nginx/nginx.conf:ro
+    # nginx.rehearsal.conf는 upstream을 `server app:8080`으로 정적 참조하고, nginx는 기동 시
+    # 이 이름을 1회 해석하며 실패하면 즉시 죽는다 — app 컨테이너가 먼저 떠 있어야 한다.
+    depends_on:
+      - app
     cpus: 0.25
-    mem_limit: 1g
+    mem_limit: 96m
+
+  prometheus:
+    mem_limit: 350m
+
+  grafana:
+    mem_limit: 350m
 
   # 평소엔 gradlew bootRun으로 호스트에서 돌리는 앱을, 리허설에서만 AWS와 동일하게 컨테이너로 띄운다.
   app:
@@ -52,13 +85,27 @@ services:
     env_file:
       - ./ticketrush-backend/.env
     environment:
+      # 앱은 openAt 등을 zone 없는 LocalDateTime으로 다룬다 — "서버 시계 = 서비스 civil 시각(KST)"을
+      # 암묵적으로 전제한다. 컨테이너 기본 TZ는 UTC라 host(KST)에서 만든 seed 데이터와 9시간 어긋난다.
+      # AWS EC2도 기본 UTC이므로 실배포에서도 이 값이 필요하다(aws-spec.md 배포 체크리스트에 반영).
+      TZ: Asia/Seoul
+      # 한계 테스트 중 재시드 사이 토큰이 만료돼 false 401이 쏟아지는 걸 막는다(테스트 전용, 4시간).
+      JWT_ACCESS_EXPIRATION: "14400000"
       # .env/application.properties 기본값은 전부 localhost 기준(호스트 bootRun용) — 컨테이너 네트워크
       # 안에서는 서비스명으로 덮어써야 한다. 나머지 값(JWT_SECRET 등)은 env_file의 .env를 그대로 쓴다.
       DB_URL: jdbc:mysql://mysql:3306/ticketrush?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&rewriteBatchedStatements=true
       REDIS_HOST: redis
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_CONNECT_REST_URL: http://kafka-connect:8083
+      # 한계 테스트 튜닝 노브 (1차·버스트1에서 병목으로 확인된 값들).
+      #   버스트1 = 1500 동시 접속 중 764개가 TCP 레벨 Connection refused (Tomcat accept 큐 overflow),
+      #   HikariCP pending 188 (풀 기본 10). 두 값을 올려 천장이 어디까지 오르는지 측정.
+      #   전환: HIKARI_POOL=20 TOMCAT_ACCEPT=2000 docker compose -f ... -f docker-compose.rehearsal.yml up -d app
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${HIKARI_POOL:-10}
+      SERVER_TOMCAT_ACCEPT_COUNT: ${TOMCAT_ACCEPT:-100}
+      SERVER_TOMCAT_MAX_CONNECTIONS: ${TOMCAT_MAXCONN:-8192}
+      SERVER_TOMCAT_THREADS_MAX: ${TOMCAT_THREADS:-200}
     ports:
       - "8080:8080"
     cpus: 2.0
-    mem_limit: 6g
+    mem_limit: 2400m
