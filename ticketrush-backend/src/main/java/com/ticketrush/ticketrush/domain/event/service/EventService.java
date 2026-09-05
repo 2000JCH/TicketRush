@@ -13,6 +13,7 @@ import com.ticketrush.ticketrush.domain.event.repository.EventRepository;
 import com.ticketrush.ticketrush.domain.event.repository.SeatBulkInsertRepository;
 import com.ticketrush.ticketrush.domain.event.repository.SectionRepository;
 import com.ticketrush.ticketrush.domain.event.repository.SeatRepository;
+import com.ticketrush.ticketrush.domain.seat.repository.SeatCatalogRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.SeatStatusRepository;
 import com.ticketrush.ticketrush.domain.seat.service.SeatStatusRebuildService;
 import com.ticketrush.ticketrush.global.exception.BusinessException;
@@ -59,6 +60,7 @@ public class EventService {
     private final SectionRepository sectionRepository;
     private final SeatRepository seatRepository;
     private final SeatBulkInsertRepository seatBulkInsertRepository;
+    private final SeatCatalogRepository seatCatalogRepository;
     private final SeatStatusRepository seatStatusRepository;
     private final SeatStatusRebuildService seatStatusRebuildService;
     private final AccountRepository accountRepository;
@@ -134,6 +136,9 @@ public class EventService {
     }
 
     private void deleteSectionsAndSeats(Long eventId) {
+        sectionRepository.findAllByEventIdOrderByIdAsc(eventId).stream()
+                .filter(section -> !section.isStanding())
+                .forEach(section -> seatCatalogRepository.delete(section.getId()));
         seatRepository.deleteAllByEventId(eventId);
         sectionRepository.deleteAllByEventId(eventId);
     }
@@ -147,11 +152,26 @@ public class EventService {
         // 구역 행이 DB에 들어간 뒤라야 seat의 FK(section_id)를 채울 수 있다.
         sections.stream()
                 .filter(section -> !section.isStanding())
-                .forEach(section -> seatBulkInsertRepository.insertGrid(
-                        section.getId(), section.getRowCount(), section.getSeatsPerRow()));
+                .forEach(section -> {
+                    seatBulkInsertRepository.insertGrid(
+                            section.getId(), section.getRowCount(), section.getSeatsPerRow());
+                    cacheSeatCatalog(section.getId());
+                });
 
         initializeSeatStatus(event.getId(), sections);
         return sections;
+    }
+
+    /**
+     * 방금 만든 좌석을 DB에서 딱 한 번 읽어 Redis 캐시(SeatCatalogRepository)에 채운다 —
+     * 좌석 조회 API가 그 뒤로는 DB를 전혀 안 치게 하기 위함(위 클래스 주석 참고).
+     */
+    private void cacheSeatCatalog(Long sectionId) {
+        List<SeatCatalogRepository.Entry> entries = seatRepository
+                .findAllBySectionIdOrderByRowNoAscSeatNoAsc(sectionId).stream()
+                .map(seat -> new SeatCatalogRepository.Entry(seat.getId(), seat.getRowNo(), seat.getSeatNo()))
+                .toList();
+        seatCatalogRepository.save(sectionId, entries);
     }
 
     /**

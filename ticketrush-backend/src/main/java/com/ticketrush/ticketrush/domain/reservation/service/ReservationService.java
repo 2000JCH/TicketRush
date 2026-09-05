@@ -32,6 +32,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -66,6 +67,7 @@ public class ReservationService {
     private final SeatService seatService;
     private final QueueService queueService;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
 
     @Value("${seat.hold-ttl-millis}")
     private long holdTtlMillis;
@@ -73,26 +75,38 @@ public class ReservationService {
     @Value("${payment.processing-timeout-millis}")
     private long paymentProcessingTimeoutMillis;
 
-    @Transactional
+    /**
+     * DB 트랜잭션은 실제로 DB에 쓰는 구간(아래 `transactionTemplate.execute`)만 감싼다
+     * (2026-09-05, 한계 테스트 원인 진단 — `test-results.md` 4-5). 원래는 메서드 전체가
+     * `@Transactional`이라 입장 토큰 검증·활성 홀드 조회·멱등키 클레임(전부 Redis)까지 DB
+     * 커넥션을 붙잡은 채 실행되고 있었다. 유일한 예외는 맨 끝 `reschedulePaymentTimeout`
+     * (Redis)인데, 이건 트랜잭션 밖으로 빼지 않고 그대로 안에 둔다 — 밖으로 빼면 예약은 DB에
+     * 커밋됐는데 좌석 만료 스케줄 갱신만 실패하는 경우 결제 처리 중인 좌석이 원래 홀드 TTL
+     * 기준으로 먼저 풀려버릴 위험이 있어서, "예약 저장 + 스케줄 갱신"을 여전히 하나로 묶는다.
+     */
     public ReservationResponse requestPayment(Long accountId, String entryToken, PaymentRequest request) {
         Long eventId = request.eventId();
         queueService.validateEntryToken(accountId, eventId, entryToken);
-
-        Account account = accountRepository.findById(accountId)
-                .orElseThrow(() -> new BusinessException(ErrorCode.ACCOUNT_NOT_FOUND));
-        Event event = eventRepository.findById(eventId)
-                .orElseThrow(() -> new BusinessException(ErrorCode.EVENT_NOT_FOUND));
 
         SeatService.ActiveHold activeHold = seatService.findActiveHold(eventId, accountId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ACTIVE_HOLD_NOT_FOUND));
         validateMatchesHold(request, activeHold);
 
-        Section section = sectionRepository.findById(activeHold.sectionId())
-                .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_INPUT, "존재하지 않는 구역입니다."));
-
         if (!idempotencyRepository.tryClaim(request.idempotencyKey(), Duration.ofMillis(holdTtlMillis))) {
             throw new BusinessException(ErrorCode.DUPLICATE_PAYMENT_REQUEST);
         }
+
+        return transactionTemplate.execute(status -> requestPaymentInTransaction(accountId, eventId, request, activeHold));
+    }
+
+    private ReservationResponse requestPaymentInTransaction(
+            Long accountId, Long eventId, PaymentRequest request, SeatService.ActiveHold activeHold) {
+        Account account = accountRepository.findById(accountId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.ACCOUNT_NOT_FOUND));
+        Event event = eventRepository.findById(eventId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.EVENT_NOT_FOUND));
+        Section section = sectionRepository.findById(activeHold.sectionId())
+                .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_INPUT, "존재하지 않는 구역입니다."));
 
         int quantity = activeHold.isSeat() ? activeHold.seatIds().size() : activeHold.quantity();
         int amount = section.getPrice() * quantity;

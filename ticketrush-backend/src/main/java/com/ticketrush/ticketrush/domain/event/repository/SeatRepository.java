@@ -15,6 +15,15 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
 
     long countBySectionId(Long sectionId);
 
+    /**
+     * `SeatService.validateSeatsBelongToSection`이 `seat.getSection().getEvent()`까지 확인해야
+     * 하는데, `Seat.section`/`Section.event`가 전부 LAZY라 트랜잭션 없이(2026-09-05 트랜잭션 범위
+     * 축소 이후) 그냥 `findAllById`로 읽으면 이 메서드가 끝나 세션이 닫힌 뒤 접근하다
+     * `LazyInitializationException`이 난다. JOIN FETCH로 한 번에 같이 읽어온다.
+     */
+    @Query("SELECT s FROM Seat s JOIN FETCH s.section sec JOIN FETCH sec.event WHERE s.id IN :seatIds")
+    List<Seat> findAllByIdInFetchSectionAndEvent(@Param("seatIds") List<Long> seatIds);
+
     /** 좌석 상태 조회 API(api-design.md 4번)에서 좌석 배치 순서대로 내려주기 위해 정렬해서 조회한다. */
     List<Seat> findAllBySectionIdOrderByRowNoAscSeatNoAsc(Long sectionId);
 

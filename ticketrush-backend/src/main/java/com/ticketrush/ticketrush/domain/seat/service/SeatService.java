@@ -16,6 +16,7 @@ import com.ticketrush.ticketrush.domain.seat.lock.GroupHoldLockStrategy;
 import com.ticketrush.ticketrush.domain.seat.repository.ActiveReservationRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.HoldRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.HoldScheduleRepository;
+import com.ticketrush.ticketrush.domain.seat.repository.SeatCatalogRepository;
 import com.ticketrush.ticketrush.domain.seat.repository.SeatStatusRepository;
 import com.ticketrush.ticketrush.global.exception.BusinessException;
 import com.ticketrush.ticketrush.global.exception.ErrorCode;
@@ -32,7 +33,6 @@ import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 좌석 상태 모델 — 단일/그룹(2매) 좌석 홀드 흐름 + 홀드 TTL/만료 처리(decisions.md 1·2번,
@@ -56,6 +56,7 @@ public class SeatService {
     private final EventRepository eventRepository;
     private final SectionRepository sectionRepository;
     private final SeatRepository seatRepository;
+    private final SeatCatalogRepository seatCatalogRepository;
     private final SeatStatusRepository seatStatusRepository;
     private final HoldRepository holdRepository;
     private final ActiveReservationRepository activeReservationRepository;
@@ -70,6 +71,7 @@ public class SeatService {
             EventRepository eventRepository,
             SectionRepository sectionRepository,
             SeatRepository seatRepository,
+            SeatCatalogRepository seatCatalogRepository,
             SeatStatusRepository seatStatusRepository,
             HoldRepository holdRepository,
             ActiveReservationRepository activeReservationRepository,
@@ -82,6 +84,7 @@ public class SeatService {
         this.eventRepository = eventRepository;
         this.sectionRepository = sectionRepository;
         this.seatRepository = seatRepository;
+        this.seatCatalogRepository = seatCatalogRepository;
         this.seatStatusRepository = seatStatusRepository;
         this.holdRepository = holdRepository;
         this.activeReservationRepository = activeReservationRepository;
@@ -93,7 +96,15 @@ public class SeatService {
         this.holdTtl = Duration.ofMillis(holdTtlMillis);
     }
 
-    @Transactional(readOnly = true)
+    /**
+     * 메서드 전체를 트랜잭션으로 감싸지 않는다(2026-09-05, 한계 테스트 원인 진단) — 이 메서드는
+     * 입장 토큰 검증·Redis 좌석 상태 조회가 대부분이고 DB는 캐시 미스일 때만 잠깐 필요한데,
+     * `@Transactional`로 감싸면 그 DB 조회가 필요 없는 순간(캐시 히트)까지 DB 커넥션을 통째로
+     * 붙잡고 있어 HikariCP 풀을 필요 이상으로 빨리 고갈시킨다. DB가 실제로 필요한
+     * `seatRepository`/`sectionRepository` 호출은 Spring Data JPA가 각 호출마다 자체적으로
+     * 짧은 트랜잭션을 걸어주므로(`SeatStatusRebuildService`가 이미 쓰는 것과 같은 패턴)
+     * 여기서 다시 감쌀 필요가 없다.
+     */
     public List<SeatStatusResponse> findStatuses(
             Long accountId, Long eventId, Long sectionId, String entryToken) {
         queueService.validateEntryToken(accountId, eventId, entryToken);
@@ -105,17 +116,43 @@ public class SeatService {
                     "스탠딩 구역은 좌석 상태를 조회할 수 없습니다. 잔여 수량은 이벤트 상세 조회를 이용하세요.");
         }
 
-        List<Seat> seats = seatRepository.findAllBySectionIdOrderByRowNoAscSeatNoAsc(sectionId);
+        List<SeatCatalogRepository.Entry> catalog = seatCatalog(sectionId);
         Map<Long, SeatState> statuses = seatStatusRepository.findSeatStatuses(
-                eventId, seats.stream().map(Seat::getId).toList());
+                eventId, catalog.stream().map(SeatCatalogRepository.Entry::seatId).toList());
 
-        return seats.stream()
-                .map(seat -> new SeatStatusResponse(
-                        seat.getId(), seat.getRowNo(), seat.getSeatNo(), statuses.get(seat.getId())))
+        return catalog.stream()
+                .map(entry -> new SeatStatusResponse(
+                        entry.seatId(), entry.rowNo(), entry.seatNo(), statuses.get(entry.seatId())))
                 .toList();
     }
 
-    @Transactional(readOnly = true)
+    /**
+     * 좌석 배치도는 등록 시점에 캐시가 채워져 있어야 정상이다(EventService.cacheSeatCatalog).
+     * 캐시가 비어 있으면(Redis 유실 등) DB로 폴백하면서 다시 채운다 — seat_status rebuild와 같은
+     * 자가복구 패턴이다.
+     */
+    private List<SeatCatalogRepository.Entry> seatCatalog(Long sectionId) {
+        List<SeatCatalogRepository.Entry> cached = seatCatalogRepository.find(sectionId);
+        if (!cached.isEmpty()) {
+            return cached;
+        }
+        List<SeatCatalogRepository.Entry> fromDb = seatRepository
+                .findAllBySectionIdOrderByRowNoAscSeatNoAsc(sectionId).stream()
+                .map(seat -> new SeatCatalogRepository.Entry(seat.getId(), seat.getRowNo(), seat.getSeatNo()))
+                .toList();
+        seatCatalogRepository.save(sectionId, fromDb);
+        return fromDb;
+    }
+
+    /**
+     * 메서드 전체를 트랜잭션으로 감싸지 않는다(2026-09-05, 한계 테스트 원인 진단) — DB가 필요한
+     * 곳은 `eventRepository.existsById`/`validateSeatsBelongToSection`/`checkAntiScalping`뿐이고
+     * (각각 Spring Data JPA가 자체적으로 짧게 트랜잭션을 건다), 나머지(입장 토큰 검증, 그룹 홀드
+     * 락 획득 — 경합 시 최대 `group-hold.lock-wait-millis`까지 대기, 좌석 홀드 HSETNX, 만료
+     * 스케줄 등록)는 전부 Redis다. `@Transactional`로 전체를 감싸면 이 Redis 대기 시간 내내
+     * DB 커넥션을 그냥 쥐고만 있어 HikariCP 풀을 필요 이상으로 빨리 고갈시킨다(한계 테스트에서
+     * 확인, `test-results.md` 4-5).
+     */
     public SeatHoldResponse hold(Long accountId, Long eventId, String entryToken, SeatHoldRequest request) {
         queueService.validateEntryToken(accountId, eventId, entryToken);
         if (!eventRepository.existsById(eventId)) {
@@ -205,7 +242,7 @@ public class SeatService {
     }
 
     private void validateSeatsBelongToSection(Long eventId, Long sectionId, List<Long> seatIds) {
-        List<Seat> seats = seatRepository.findAllById(seatIds);
+        List<Seat> seats = seatRepository.findAllByIdInFetchSectionAndEvent(seatIds);
         if (seats.size() != seatIds.size()) {
             throw new BusinessException(ErrorCode.SEAT_NOT_FOUND);
         }
@@ -247,7 +284,8 @@ public class SeatService {
      * `active_reservation` 값의 인코딩(`HoldRecord`)은 이 클래스 밖으로 노출하지 않고, 필요한
      * 필드만 담은 공개 DTO(`ActiveHold`)로 변환해 돌려준다.
      */
-    @Transactional(readOnly = true)
+    /** 순수 Redis 조회라 DB 커넥션이 전혀 필요 없다 — 2026-09-05 한계 테스트 원인 진단 중 발견,
+     * `@Transactional`이 불필요하게 붙어있어 매 결제 요청마다 커넥션을 하나씩 헛되이 빌리고 있었다. */
     public Optional<ActiveHold> findActiveHold(Long eventId, Long accountId) {
         return activeReservationRepository.find(eventId, accountId)
                 .map(HoldRecord::parse)
