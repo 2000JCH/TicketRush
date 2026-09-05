@@ -80,6 +80,14 @@ public class GoldenPathSimulation extends Simulation {
     private static final int TAIL_SECONDS = Integer.getInteger("tail.seconds", 0);
     private static final double TAIL_USERS_PER_SEC =
             Double.parseDouble(System.getProperty("tail.users.per.sec", "2"));
+    /**
+     * 대기열 이탈 시나리오(decisions.md 4번, 2026-08-27 확인 — 2026-09-05 실측). 이 비율만큼은
+     * 대기열 진입만 하고 다시 폴링하지 않는다(탭을 닫은 사용자 흉내). `EntryTokenScheduler`가
+     * 이탈자도 실사용자와 구분 없이 순서대로 admit-count만큼 뽑아 토큰을 발급하므로(제거는 이때
+     * 함께 일어남), 이탈자가 앞자리를 차지한 만큼 뒤에 남은 실사용자의 체감 대기가 늘어나는지를
+     * 이 파라미터로 재현한다. 0.0(기본, 이탈 없음)이면 기존 동작과 동일하다.
+     */
+    private static final double DROPOUT_RATIO = Double.parseDouble(System.getProperty("dropout.ratio", "0.0"));
 
     private final HttpProtocolBuilder httpProtocol = http
             .baseUrl(BASE_URL)
@@ -126,53 +134,62 @@ public class GoldenPathSimulation extends Simulation {
                     .post("/api/v1/events/" + EVENT_ID + "/queue/entries")
                     .header("Authorization", "Bearer #{accessToken}")
                     .check(status().in(201, 200)))
-            // 2. 순번 폴링 — entryToken이 채워질 때까지 (최대 QUEUE_POLL_MAX회)
-            .exec(session -> session.set("entryToken", "").set("polls", 0))
-            .asLongAs(session -> session.getString("entryToken").isEmpty()
-                    && session.getInt("polls") < QUEUE_POLL_MAX)
-            .on(
-                    exec(http("queue-poll")
-                            .get("/api/v1/events/" + EVENT_ID + "/queue/entries/me")
-                            .header("Authorization", "Bearer #{accessToken}")
-                            .check(status().is(200))
-                            .check(jsonPath("$.entryToken").optional().saveAs("entryTokenMaybe")))
-                    .exec(session -> {
-                        String t = session.getString("entryTokenMaybe");
-                        return session
-                                .set("entryToken", t == null ? "" : t)
-                                .set("polls", session.getInt("polls") + 1)
-                                .remove("entryTokenMaybe");
-                    })
-                    .pause(Duration.ofMillis(1000))
+            // 이탈 시뮬레이션: DROPOUT_RATIO만큼은 여기서 멈춘다(탭을 닫고 다시 폴링하지 않는 사용자).
+            // 대기열엔 그대로 남아있다가 EntryTokenScheduler가 순서대로 admit-count만큼 뽑을 때
+            // 실사용자와 구분 없이 함께 소비된다(decisions.md 4번) — 뒤에 남은 실사용자의 체감
+            // 대기(폴링 횟수)가 늘어나는지를 이 분기로 재현한다.
+            .exec(session -> session.set("dropped", ThreadLocalRandom.current().nextDouble() < DROPOUT_RATIO))
+            .doIfOrElse(session -> !session.getBoolean("dropped"))
+            .then(
+                    // 2. 순번 폴링 — entryToken이 채워질 때까지 (최대 QUEUE_POLL_MAX회)
+                    exec(session -> session.set("entryToken", "").set("polls", 0))
+                            .asLongAs(session -> session.getString("entryToken").isEmpty()
+                                    && session.getInt("polls") < QUEUE_POLL_MAX)
+                            .on(
+                                    exec(http("queue-poll")
+                                            .get("/api/v1/events/" + EVENT_ID + "/queue/entries/me")
+                                            .header("Authorization", "Bearer #{accessToken}")
+                                            .check(status().is(200))
+                                            .check(jsonPath("$.entryToken").optional().saveAs("entryTokenMaybe")))
+                                    .exec(session -> {
+                                        String t = session.getString("entryTokenMaybe");
+                                        return session
+                                                .set("entryToken", t == null ? "" : t)
+                                                .set("polls", session.getInt("polls") + 1)
+                                                .remove("entryTokenMaybe");
+                                    })
+                                    .pause(Duration.ofMillis(1000))
+                            )
+                            .doIf(session -> session.getString("entryToken").isEmpty())
+                            .then(exec(Session::markAsFailed).exitHereIfFailed())
+                            // 3. 좌석 상태 조회 — 응답에서 seatId 목록을 뽑아 세션에 저장
+                            .exec(http("seat-list")
+                                    .get("/api/v1/events/" + EVENT_ID + "/seats?sectionId=" + SECTION_ID)
+                                    .header("Authorization", "Bearer #{accessToken}")
+                                    .header("X-Entry-Token", "#{entryToken}")
+                                    .check(status().is(200))
+                                    .check(jsonPath("$[*].seatId").findAll().saveAs("seatIds")))
+                            .pause(Duration.ofMillis(500), Duration.ofSeconds(2))
+                            // 4. 좌석 홀드 (지정석 1~2개). 경합으로 SEAT_ALREADY_HELD/락 타임아웃(409)이 정상적으로 날 수 있다.
+                            .exec(GoldenPathSimulation::pickSeats)
+                            .exec(http("seat-hold")
+                                    .post("/api/v1/events/" + EVENT_ID + "/seats/holds")
+                                    .header("Authorization", "Bearer #{accessToken}")
+                                    .header("X-Entry-Token", "#{entryToken}")
+                                    .body(StringBody("{\"sectionId\":" + SECTION_ID + ",\"seatIds\":#{seatIdsJson}}"))
+                                    .check(status().in(200, 409))
+                                    .check(status().saveAs("holdStatus")))
+                            // 5. 홀드에 성공한 유저만 결제 요청
+                            .doIf(session -> session.getInt("holdStatus") == 200)
+                            .then(exec(http("payment-request")
+                                    .post("/api/v1/reservations")
+                                    .header("Authorization", "Bearer #{accessToken}")
+                                    .header("X-Entry-Token", "#{entryToken}")
+                                    .body(StringBody("{\"eventId\":" + EVENT_ID + ",\"sectionId\":" + SECTION_ID
+                                            + ",\"seatIds\":#{seatIdsJson},\"idempotencyKey\":\"#{idemKey}\"}"))
+                                    .check(status().in(201, 409, 422))))
             )
-            .doIf(session -> session.getString("entryToken").isEmpty())
-            .then(exec(Session::markAsFailed).exitHereIfFailed())
-            // 3. 좌석 상태 조회 — 응답에서 seatId 목록을 뽑아 세션에 저장
-            .exec(http("seat-list")
-                    .get("/api/v1/events/" + EVENT_ID + "/seats?sectionId=" + SECTION_ID)
-                    .header("Authorization", "Bearer #{accessToken}")
-                    .header("X-Entry-Token", "#{entryToken}")
-                    .check(status().is(200))
-                    .check(jsonPath("$[*].seatId").findAll().saveAs("seatIds")))
-            .pause(Duration.ofMillis(500), Duration.ofSeconds(2))
-            // 4. 좌석 홀드 (지정석 1~2개). 경합으로 SEAT_ALREADY_HELD/락 타임아웃(409)이 정상적으로 날 수 있다.
-            .exec(GoldenPathSimulation::pickSeats)
-            .exec(http("seat-hold")
-                    .post("/api/v1/events/" + EVENT_ID + "/seats/holds")
-                    .header("Authorization", "Bearer #{accessToken}")
-                    .header("X-Entry-Token", "#{entryToken}")
-                    .body(StringBody("{\"sectionId\":" + SECTION_ID + ",\"seatIds\":#{seatIdsJson}}"))
-                    .check(status().in(200, 409))
-                    .check(status().saveAs("holdStatus")))
-            // 5. 홀드에 성공한 유저만 결제 요청
-            .doIf(session -> session.getInt("holdStatus") == 200)
-            .then(exec(http("payment-request")
-                    .post("/api/v1/reservations")
-                    .header("Authorization", "Bearer #{accessToken}")
-                    .header("X-Entry-Token", "#{entryToken}")
-                    .body(StringBody("{\"eventId\":" + EVENT_ID + ",\"sectionId\":" + SECTION_ID
-                            + ",\"seatIds\":#{seatIdsJson},\"idempotencyKey\":\"#{idemKey}\"}"))
-                    .check(status().in(201, 409, 422))));
+            .orElse(exec(session -> session));
 
     /** inject.mode에 맞는 투입 프로파일. 클래스 Javadoc의 "대기열 진입 투입 방식" 참고. */
     private PopulationBuilder injectionProfile() {

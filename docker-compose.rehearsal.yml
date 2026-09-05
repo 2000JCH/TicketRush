@@ -105,6 +105,11 @@ services:
       SERVER_TOMCAT_ACCEPT_COUNT: ${TOMCAT_ACCEPT:-100}
       SERVER_TOMCAT_MAX_CONNECTIONS: ${TOMCAT_MAXCONN:-8192}
       SERVER_TOMCAT_THREADS_MAX: ${TOMCAT_THREADS:-200}
+      # 대기열 이탈률 실측(decisions.md 4번, 2026-09-05)용 노브. 기본 100/1000ms는 소규모(60~120명)
+      # 실험에서 한 주기에 다 빠져나가버려 대기 차이가 안 보인다 — 실험 중에만 QUEUE_ADMIT_COUNT를
+      # 작게 줘서 여러 주기에 걸쳐 빠지게 만든다. 전환: QUEUE_ADMIT_COUNT=20 docker compose ... up -d app
+      QUEUE_ADMIT_COUNT: ${QUEUE_ADMIT_COUNT:-100}
+      QUEUE_ADMIT_INTERVAL: ${QUEUE_ADMIT_INTERVAL:-1000}
     ports:
       - "8080:8080"
     cpus: 2.0

@@ -40,6 +40,8 @@ services:
       BURST_RATIO: ${GATLING_BURST_RATIO:-0.7}
       TAIL_SECONDS: ${GATLING_TAIL_SECONDS:-0}
       TAIL_USERS_PER_SEC: ${GATLING_TAIL_USERS_PER_SEC:-2}
+      # 대기열 이탈률 실측(decisions.md 4번, 2026-09-05)용 — 기본 0.0(이탈 없음)이면 기존 동작과 동일.
+      DROPOUT_RATIO: ${GATLING_DROPOUT_RATIO:-0.0}
       # gradle 클라이언트 JVM 힙을 좁혀 리허설 예산(VM 8GB cap) 안에 여유를 남긴다.
       GRADLE_OPTS: "-Xmx512m"
     entrypoint: ["sh", "-c"]
@@ -50,6 +52,7 @@ services:
         -Dusers=$$USERS -Dramp.seconds=$$RAMP_SECONDS -Dinject.mode=$$INJECT_MODE
         -Dgroup.hold.ratio=$$GROUP_HOLD_RATIO -Dburst.ratio=$$BURST_RATIO
         -Dtail.seconds=$$TAIL_SECONDS -Dtail.users.per.sec=$$TAIL_USERS_PER_SEC
+        -Ddropout.ratio=$$DROPOUT_RATIO
         --console=plain
     profiles: ["gatling"]
     cpus: 1.5
