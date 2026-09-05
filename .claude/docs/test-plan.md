@@ -239,9 +239,10 @@ test-results.md 3번. Grafana 스크린샷은 두 실행이 ~15초로 짧아 표
 
 ## 4. 한계 테스트 (동시 몇 명까지 버티나)
 
-> **1차 실행 완료 2026-09-04** — `test-results.md` 4번. 요약: **정합성·병목축은 확정, 동시 인원
-> 한계 숫자는 로컬 localhost로는 못 냄**(Docker Desktop 포트 프록시가 ~800~1,000 연결에서 먼저
-> 무너짐). 진짜 숫자는 4-4(Gatling-in-container) 또는 section 5(AWS 재측정)로 확정한다.
+> **1차(localhost) + 4-4(Gatling-in-container) 실행 완료 2026-09-04** — `test-results.md` 4번/
+> 4-4번. 1차는 Docker Desktop 포트 프록시(~800~1,000 연결에서 붕괴)에 막혀 진짜 숫자를 못 냈고,
+> 4-4가 프록시를 우회해 **이 축소 스펙(2 vCPU)에서 450~500명 사이에 절벽이 있음**을 클린 재측정
+> (매 실행 전 DB/Redis 리셋)으로 확정했다. 다음 단계(원인 진단 + 튜닝 + 재측정)는 progress.md.
 
 ### 4-1. 방식 (1차에서 확정된 것)
 
@@ -269,16 +270,28 @@ test-results.md 3번. Grafana 스크린샷은 두 실행이 ~15초로 짧아 표
 - 병목축: **app CPU (2 vCPU cap, 매 버스트 197% 고정) → HikariCP/mysql**. pending은 풀 10·20 무관 ~160~190.
 - → `aws-spec.md` C: 병목축 = CPU 우선. `m6i.xlarge`(4 vCPU) + `db.m6i.large`에서 완화 예상.
 
-### 4-4. 로컬에서 진짜 숫자를 내는 법 (선택 — Gatling in container)
+### 4-4. Gatling-in-container 재측정 (실행 완료, 상세는 test-results.md 4-4)
 
-Docker 포트 프록시를 우회하려면 Gatling도 컨테이너 네트워크 안에서 돌려 `app:8080` / `nginx:80`을
-직접 친다. 레시피(미실행, 필요 시):
-1. `docker-compose.capacity.yml`에 `gatling` 서비스 추가 — `image: eclipse-temurin:21-jdk`, 소스·gradle
-   마운트, `command: ./gradlew gatlingRun --simulation simulation.GoldenPathSimulation -DbaseUrl=http://nginx:80 ...`,
-   `network` 공유. 또는 공식 `denvazh/gatling` 이미지 + 시뮬레이션 마운트.
-2. `-DbaseUrl=http://nginx:80` (컨테이너 서비스명) 또는 `http://app:8080`.
-3. 나머지(계정 시드, 종료 조건, 모니터)는 동일.
-- 주의: Gatling 컨테이너도 리허설 예산 안에서 CPU를 나눠 먹으므로 `cpus`를 따로 잡고 앱 예산과 분리.
+Docker 포트 프록시를 우회하려면 Gatling도 컨테이너 네트워크 안에서 돌려 `nginx:80`을 직접 친다.
+`docker-compose.capacity.yml`에 `gatling` 서비스로 구현됨(`image: eclipse-temurin:21-jdk`, 소스+
+`gatling_gradle_cache` 볼륨 마운트, `profiles: ["gatling"]`로 평소엔 안 뜨게 함, `-DbaseUrl`은
+env `GATLING_BASE_URL`로 주입).
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml -f docker-compose.capacity.yml `
+  --profile gatling run --rm gatling   # GATLING_EVENT_ID/GATLING_SECTION_ID/GATLING_USERS env로 파라미터
+```
+
+**필수: 매 실행 전 DB/Redis 리셋.** 리셋 없이 이벤트만 새로 만들어 연속 실행하면 N과 지연시간이
+반비례하는 이상값이 나온다(1차 시도에서 실제로 겪음, test-results.md 4-4 참고 — 원인은 데이터
+누적이 아니라 리셋 누락 자체로 결론). 리셋 절차:
+1. `reservation`/`reservation_seat`/`outbox_events` TRUNCATE
+2. 기존 테스트 `event`/`section`/`seat` DELETE
+3. Redis `FLUSHALL` (refresh_token도 지워지지만 stateless AccessToken 검증엔 무관 — 계정 재로그인 불요)
+4. 새 이벤트 생성(구역은 N×1.5 이상 여유 있게) 후 N을 늘려가며 재실행
+
+주의: Gatling 컨테이너도 리허설 예산 안에서 CPU/메모리를 나눠 먹으므로 `cpus`/`mem_limit`을 앱
+예산과 분리해 잡는다(현재 1.5 vCPU / 1024m).
 
 ### 4-5. 다음 세션 빠른 재기동 체크리스트 (설정에 시간 날리지 않도록)
 

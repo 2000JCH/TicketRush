@@ -125,31 +125,32 @@
   - **동시 인원 한계 숫자는 로컬 localhost로 못 냄** — 프록시가 ~800~1,000에서 먼저 무너짐. → AWS 재측정 또는 Gatling-in-container(`test-plan.md` 4-4)로 확정. 스크린샷 없음(버스트는 시각적 스토리 없음, 표로 충분 — 분산락과 동일).
   - **스택 상태**: `docker compose ... down`(볼륨 유지 — 이벤트·계정 데이터 남음). 재기동 체크리스트 `test-plan.md` 4-5.
 
+- **2026-09-04**: **① 세션 변경분 커밋 완료(계획대로 3분할, `61b8ab5`/`bbbd988`/`e7d428b`) → ② Gatling-in-container 재측정 완료(`test-results.md` 4-4).** `docker-compose.capacity.yml`에 `gatling` 서비스 신규(컨테이너 네트워크 안에서 `nginx:80`을 직접 쳐 Docker Desktop 포트 프록시를 우회, `profiles: ["gatling"]`로 평소엔 안 뜸).
+  - **1차 시도(방법론 결함, 폐기)**: 이벤트만 새로 만들고 DB/Redis는 리셋 없이 1,500→2,000→1,750→800명 순으로 4회 실행 — 프록시 우회 자체는 성공(오버셀 0, Connection refused 0)했지만 **N과 서버측 P95가 반비례하는 이상값**이 나왔다. `reservation` 누적 행수(3,728→8,724)를 의심했으나 실측 데이터 용량이 InnoDB 버퍼풀 기본값(128MB) 안에 여유 있게 들어가(합 ~14MB) 반증됨 — **사용자가 "테스트마다 DB 지우고 하면 되잖아"로 문제 제기**, 근본 원인은 데이터 누적이 아니라 테스트 간 상태를 리셋하지 않은 것 자체였다.
+  - **2차 시도(클린 재측정, 채택)**: 매 실행 전 `reservation`/`reservation_seat`/`outbox_events` TRUNCATE + 기존 테스트 이벤트/구역/좌석 DELETE + Redis `FLUSHALL`로 동일한 초기 상태를 만들고, N을 100→250→350→450→500으로 늘려가며 재측정(계정 6,041개는 리셋 대상 제외 — stateless AccessToken이라 Redis flush와 무관). **결과: 100~450은 완만(서버 P95 6ms→132ms), 450→500 사이에서 절벽(132ms→8,990ms, 68배 폭증)** — 이 축소 스펙(app 2 vCPU)의 실제 한계는 ~460~480명 부근으로 추정. 오버셀은 전 구간 0(무너지는 방식이 안전함은 확인).
+  - **사용자 문제 제기 2건 반영**: (1) 잘못된 1차 시도 수치는 문서에서 제거하고 원인·교훈만 남김. (2) classq `load-test.md`를 참고해 "한계 발견"에서 멈추지 말고 원인 진단(HikariCP/Tomcat/GC 중 무엇이 실질 상한인지) → 튜닝 → Before/After 재측정까지 하기로 함(classq는 HikariCP 대기·BCrypt cost·Redis/Kafka 구조 전환으로 P95를 최대 -99.95%까지 개선한 선례가 있음, `all/classq/.claude/docs/load-test.md` 참고). `test-results.md` 4-3의 "풀 크기가 레버가 아니다"(host 기반, 1,500명대 측정) 결론은 절벽 지점 자체를 못 본 상태에서 나온 것이라 재검증 필요로 명시.
+  - `test-plan.md` 4-4(실행 완료로 갱신, DB 리셋 절차 필수 항목으로 반영)·`test-results.md` 4-4에 반영 완료.
+
 ## 다음 작업
 
-### ⏭️ 이어서 할 것 (2026-09-04 — 외출 후 재개, 마감 ~09-06)
+### ⏭️ 이어서 할 것 (2026-09-05 — **오늘 안에 ③~⑥ 전부 끝내는 게 목표**, 사용자 확정)
 
-**현재 위치**: 한계 테스트 1차 완료(정합성·병목축 확정). **다음 = ① 이 세션 변경분 커밋 → ② Gatling-in-container 로컬 재측정(확정) → AWS 배포 → AWS 재측정 → 포트폴리오 PDF.**
+**현재 위치**: 커밋 + Gatling-in-container 재측정(클린) 완료 — 이 축소 스펙(2 vCPU)의 절벽 지점(450~500명)까지 확정. **오늘(09-05) 순서 = ③ 원인 진단 → ④ 튜닝 적용 + Before/After 재측정 → ⑤ AWS 배포 → ⑥ AWS 재측정.** 문서(캡쳐·표)는 각 단계 끝날 때마다 바로 정리(막판 몰아서 하지 않음). 포트폴리오 PDF(⑦)는 그다음.
 
-**스택 상태**: `down`(볼륨 유지 — 이벤트·계정 데이터 남음). 재기동은 `test-plan.md` 4-5 체크리스트.
+**안전판(그대로 유지)**: ⑤ AWS 배포가 원래 추정 반나절~1~2일짜리 리스크 있는 단계라, 하루 안에 못 끝내면 "AWS 예측표(`aws-spec.md` D)까지만 하고 실배포는 다음으로 후퇴" — 이미 문서화돼 있음.
 
-#### 0. 먼저: 이 세션 변경분 커밋 (사용자 승인 후)
-분할 제안(커밋 메시지에 Claude 트레일러 금지 — CLAUDE.md 규칙):
-1. `feat(test): 한계 테스트 버스트 시나리오 + 병렬 계정 시더` — `CapacitySimulation.java`, `scripts/{run-capacity.ps1,seed-buyers-parallel.mjs,login-buyers.mjs}`, `src/gatling/resources/logback.xml`, `.gitignore`
-2. `chore(rehearsal): 리허설 스택을 16GiB PC 예산으로 축소 + 한계 테스트 오버레이` — `docker-compose.rehearsal.yml`(수정), `docker-compose.capacity.yml`·`nginx/nginx.capacity.conf`(신규)
-3. `docs: 한계 테스트 1차 결과 + 재기동 체크리스트` — `test-results.md`·`test-plan.md`·`progress.md`·`CLAUDE.md`·`aws-spec.md`·`portfolio.md`
-- `~/.wslconfig`는 저장소 밖(머신 설정) — 커밋 안 함. 내용은 `test-plan.md` 4-5에 기록됨.
-- push는 사용자가 직접.
+**스택 상태**: 컨테이너 기동 중(mysql/redis/app 등, 이벤트 1~12는 리셋됨 — 계정 6,041개만 남음). `docker ps`로 확인 후 필요시 `test-plan.md` 4-5 체크리스트로 재기동.
 
-#### 1. Gatling-in-container 로컬 재측정 (확정, ~30분·공짜)
-- **왜**: 버스트 4회가 전부 Docker 포트 프록시(~760 거부)에 막혀 **앱 자체의 동시접속 한계 숫자를 못 냄**. Gatling을 컨테이너 네트워크에 넣어 `app:8080`/`nginx:80` 직접 쳐서 프록시 우회. 알아볼 것: (a) 앱의 실제 동시접속 천장(축소 스펙), (b) 프록시가 가리던 앱 문제 유무(뻗나/메모리 새나), (c) AWS와 비교할 로컬 기준선. 문제 나오면 AWS 요금 나가기 전 로컬에서 무료로 수정.
-- **방법**: `test-plan.md` 4-4 레시피 (`docker-compose.capacity.yml`에 `gatling` 서비스 추가, `-DbaseUrl=http://nginx:80`). Gatling 컨테이너 `cpus`는 앱 예산과 분리.
-- 종료 조건은 test-plan.md 4-2. 병목 관찰(app CPU / HikariCP / mysql CPU / 호스트 메모리).
-- **Grafana 4패널 캡쳐** → `.claude/screenshots/tests/capacity/` (이 런은 찍을 가치 있음)
-- 결과 → `test-results.md` 4번 표 채우기, `portfolio.md` 소재 8, `aws-spec.md` C·D
-- **HikariCP는 10 유지**(기본값) — 1차에서 10→20이 효과 없었음(mysql CPU가 벽). AWS 재측정에서 10 vs 20 비교로 확인만.
+#### ③ 원인 진단 (다음 클린 버스트에서 절벽 지점 근처를 직접 관찰)
+- 450~500 사이(예: 460/480/500)에서 재현하며 이번엔 **HikariCP active/pending, Tomcat busy thread, app GC 로그**를 Grafana/Actuator로 직접 관찰 — 어떤 자원이 먼저 포화되는지 특정
+- 후보: HikariCP 풀(기본 10) 고갈 / Tomcat accept-count·max-threads / app GC stop-the-world / mysql 자체 CPU
+- **재검증 필요**: 기존 "풀 크기가 레버가 아니다"(4-3, host 기반 1,500명대) 결론 — 그때는 절벽을 지난 지점만 봤으므로, 이번엔 절벽 근처에서 직접 관찰해야 함
 
-#### 2. AWS 배포 (test-plan.md 참고, ~1~2일, 리스크)
+#### ④ 튜닝 적용 + Before/After 재측정
+- ③에서 특정된 병목에 맞는 조치 1~2개 적용(예: HikariCP 풀 크기 조정, Tomcat 스레드/큐 조정 등 — 확정된 원인에 따라 다름)
+- 같은 클린 방법론(DB/Redis 리셋 + N 단계별 증가)으로 튜닝 전/후 절벽 지점을 재측정해 개선율 확인 (classq 스타일: "원인 → 조치 → Before/After 수치" 구조로 `test-results.md`/`portfolio.md`에 기록)
+
+#### ⑤ AWS 배포 (test-plan.md 참고, ~1~2일, 리스크) — 순서상 ③④ 다음
 AWS 설정은 **EC2 + RDS만이 아님**. 순서:
 - **접근**: IAM 사용자(또는 루트 콘솔), 키페어(.pem) — SSH용
 - **네트워크**(제일 자주 막힘): 기본 VPC + 보안그룹 2개
@@ -171,11 +172,11 @@ AWS 설정은 **EC2 + RDS만이 아님**. 순서:
 - **역할**: Claude = `docker-compose.aws.yml` + `.env` 템플릿 + 배포 스크립트 + 단계별 체크리스트 문서 / 사용자 = AWS 콘솔 클릭 + EC2 SSH 명령 실행
 - **안전판**: AWS가 하루 넘게 꼬이면 "aws-spec.md 예측표(D)까지만 + 실배포는 마감 후"로 후퇴
 
-#### 3. AWS 재측정 (test-plan.md 5번, ~반나절)
+#### ⑥ AWS 재측정 (test-plan.md 5번, ~반나절)
 - AWS에서 골든패스 부하(300 동시) + 한계 테스트 **다시** (카오스는 로컬만, 재측정 안 함)
 - `aws-spec.md` D(예측) vs E(실측) 대조, `test-results.md` 5번
 
-#### 4. 포트폴리오 문서화 (~1일)
+#### ⑦ 포트폴리오 문서화 (~1일)
 - `test-results.md` + `portfolio.md`(소재 1~7) + `decisions.md` + `aws-spec.md` + 스크린샷(`a1-redis-down/`, `a2-kafka-down/`) → Notion → PDF (classq `정찬혁_ClassQ_포트폴리오.pdf` 참고)
 - 파일별 역할은 사용자와 이미 정리됨 (portfolio.md가 본체, test-results.md가 수치 출처)
 

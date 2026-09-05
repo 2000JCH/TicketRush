@@ -106,16 +106,22 @@ DB 락을 채택했다면 그룹 홀드 `SELECT FOR UPDATE` 경합 + 커넥션 �
   — 그 뒤의 mysql 1.5 vCPU가 실질 상한. → **CPU가 1순위 병목, DB(CPU/커넥션)가 2순위.**
 - 따라서 vCPU:RAM 1:4 m계열 + vCPU를 넉넉히(`m6i.xlarge` 4 vCPU) 방향이 맞다. RAM 병목이 아니므로
   `r` 계열은 불필요. 부하가 CPU에 더 몰리면 `m6i.2xlarge`(8 vCPU)가 scale-up 후보.
-- **로컬 한계 숫자(동시 N명)는 못 냈다** — Docker Desktop 포트 프록시(Windows↔WSL2 유저랜드 프록시)가
-  ~800~1,000 동시 연결에서 먼저 RST를 뱉는다. `server.tomcat.accept-count`를 100→2000으로 올려도
-  무효(연결이 컨테이너에 닿기 전에 죽음). **AWS엔 이 계층이 없다** — 앱이 리눅스 커널에 포트 직접 바인딩
-  + ALB/nginx 앞단. 그래서 한계 동시 사용자 수는 D(예측)·E(AWS 실측)에서 처음으로 실제 값이 나온다.
+- **로컬 한계 숫자(동시 N명)는 1차(localhost)에선 못 냈다** — Docker Desktop 포트 프록시(Windows↔
+  WSL2 유저랜드 프록시)가 ~800~1,000 동시 연결에서 먼저 RST를 뱉는다. `server.tomcat.accept-count`를
+  100→2000으로 올려도 무효(연결이 컨테이너에 닿기 전에 죽음). **AWS엔 이 계층이 없다** — 앱이 리눅스
+  커널에 포트 직접 바인딩 + ALB/nginx 앞단.
+- **Gatling-in-container 재측정(2026-09-04, `test-results.md` 4-4)으로 이 축소 스펙 기준 진짜 숫자를
+  냈다** — Gatling도 컨테이너 네트워크 안에서 `nginx:80`을 직접 쳐 위 프록시를 우회. 매 실행 전
+  DB/Redis를 리셋한 클린 재측정 결과 **100~450명은 완만(서버 P95 6ms→132ms)하다가 450→500 사이에서
+  절벽**(132ms→8,990ms)이 나타났다 — 이 스펙(2 vCPU)의 실제 한계는 **~460~480명** 부근. 다만
+  HikariCP·Tomcat·GC 중 무엇이 이 절벽의 실질 원인인지는 아직 미확정(다음 단계에서 진단). AWS(4 vCPU,
+  2배)에서 이 한계가 어디까지 올라가는지가 D(예측)·E(AWS 실측)의 핵심 질문이다.
 
 ### C-1. 배포 시 반영할 튜닝 (한계 테스트에서 나온 것)
 
 | 항목 | 값 | 근거 / 상태 |
 |---|---|---|
-| `spring.datasource.hikari.maximum-pool-size` | **10 유지 (기본값)** | 버스트 시 pending 160~190이었지만, 10→20으로 올려도 pending이 안 줄었다 — 뒤의 mysql CPU가 벽이라 풀 크기가 레버가 아님. HikariCP 공식 가이드도 "풀은 작게"(2 vCPU DB면 4~10 적정). **AWS 재측정에서 10 vs 20 한 번 비교**해 이 결론(풀 크기 무관, DB CPU가 병목)을 확인만 한다 |
+| `spring.datasource.hikari.maximum-pool-size` | **10 (재검증 필요)** | 1차(host, 1,500명대)에선 10→20이 pending을 못 줄여 "레버가 아니다"로 결론냈으나, 4-4 재측정으로 절벽이 450~500 사이에 있는 걸 알게 된 지금은 이 결론이 **절벽을 이미 넘은 지점만 본 것**이라 재검증 필요 — 다음 단계(원인 진단)에서 절벽 근처(450~500)에서 HikariCP 상태를 직접 관찰해 확인 |
 | `server.tomcat.accept-count` | 100 → **미정 (AWS에서 검증)** | 버스트 시 기본 100은 작아 보이나, 로컬에선 Docker 프록시에 가려 100→2000 효과를 검증 못 했다. AWS(프록시 없음)에서 실제로 필요한지 + 적정값 확인 |
 | `TZ` / `-Duser.timezone` | **`Asia/Seoul`** ✅ | 앱이 `openAt` 등을 zone 없는 `LocalDateTime`으로 다룸. EC2 기본 UTC면 KST 기준 데이터와 9h 어긋남 — 이건 확정 반영 |
 
