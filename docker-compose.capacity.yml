@@ -5,6 +5,13 @@
 # 수천 연결을 한꺼번에 던지는 한계 테스트에서 (1) per-IP rate limit이 전부를 429로 막는 것과
 # (2) Docker Desktop 포트 프록시(localhost:8080 직결)가 병목이 되는 것 둘 다 피하기 위함.
 # Gatling은 -DbaseUrl=http://localhost:8081 (nginx 경유)로 실행한다.
+#
+# gatling 서비스(2026-09-05 신규, test-plan.md 4-4): Gatling도 컨테이너 네트워크 안에서 돌려
+# 위 (2)의 프록시 자체를 아예 우회한다 — nginx/app을 서비스명(`http://nginx:80`)으로 직접 친다.
+# 기본으론 안 뜨게 profiles로 묶고, 매번 인원수를 바꿔가며 `run --rm`으로 실행한다:
+#   GATLING_EVENT_ID=<id> GATLING_SECTION_ID=<id> GATLING_USERS=1500 \
+#     docker compose -f docker-compose.yml -f docker-compose.rehearsal.yml -f docker-compose.capacity.yml \
+#     --profile gatling run --rm gatling
 
 services:
   nginx:
@@ -12,3 +19,41 @@ services:
       - ./nginx/nginx.capacity.conf:/etc/nginx/nginx.conf:ro
     cpus: 0.5
     mem_limit: 160m
+
+  gatling:
+    image: eclipse-temurin:21-jdk
+    container_name: ticketrush-gatling
+    working_dir: /workspace
+    depends_on:
+      - nginx
+    volumes:
+      - ./ticketrush-backend:/workspace
+      - gatling_gradle_cache:/root/.gradle
+    environment:
+      BASE_URL: ${GATLING_BASE_URL:-http://nginx:80}
+      EVENT_ID: ${GATLING_EVENT_ID:-1}
+      SECTION_ID: ${GATLING_SECTION_ID:-1}
+      USERS: ${GATLING_USERS:-100}
+      RAMP_SECONDS: ${GATLING_RAMP_SECONDS:-0}
+      INJECT_MODE: ${GATLING_INJECT_MODE:-atonce}
+      GROUP_HOLD_RATIO: ${GATLING_GROUP_HOLD_RATIO:-0.3}
+      BURST_RATIO: ${GATLING_BURST_RATIO:-0.7}
+      TAIL_SECONDS: ${GATLING_TAIL_SECONDS:-0}
+      TAIL_USERS_PER_SEC: ${GATLING_TAIL_USERS_PER_SEC:-2}
+      # gradle 클라이언트 JVM 힙을 좁혀 리허설 예산(VM 8GB cap) 안에 여유를 남긴다.
+      GRADLE_OPTS: "-Xmx512m"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        sh gradlew gatlingRun --simulation simulation.GoldenPathSimulation
+        -DbaseUrl=$$BASE_URL -Devent.id=$$EVENT_ID -Dsection.id=$$SECTION_ID
+        -Dusers=$$USERS -Dramp.seconds=$$RAMP_SECONDS -Dinject.mode=$$INJECT_MODE
+        -Dgroup.hold.ratio=$$GROUP_HOLD_RATIO -Dburst.ratio=$$BURST_RATIO
+        -Dtail.seconds=$$TAIL_SECONDS -Dtail.users.per.sec=$$TAIL_USERS_PER_SEC
+        --console=plain
+    profiles: ["gatling"]
+    cpus: 1.5
+    mem_limit: 1024m
+
+volumes:
+  gatling_gradle_cache:
