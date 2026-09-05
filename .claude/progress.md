@@ -131,6 +131,20 @@
   - **사용자 문제 제기 2건 반영**: (1) 잘못된 1차 시도 수치는 문서에서 제거하고 원인·교훈만 남김. (2) classq `load-test.md`를 참고해 "한계 발견"에서 멈추지 말고 원인 진단(HikariCP/Tomcat/GC 중 무엇이 실질 상한인지) → 튜닝 → Before/After 재측정까지 하기로 함(classq는 HikariCP 대기·BCrypt cost·Redis/Kafka 구조 전환으로 P95를 최대 -99.95%까지 개선한 선례가 있음, `all/classq/.claude/docs/load-test.md` 참고). `test-results.md` 4-3의 "풀 크기가 레버가 아니다"(host 기반, 1,500명대 측정) 결론은 절벽 지점 자체를 못 본 상태에서 나온 것이라 재검증 필요로 명시.
   - `test-plan.md` 4-4(실행 완료로 갱신, DB 리셋 절차 필수 항목으로 반영)·`test-results.md` 4-4에 반영 완료.
 
+- **2026-09-05**: **한계 테스트 원인 진단 + 캐싱 튜닝 Before/After 완료 (`test-results.md` 4-5).** 4-4의 절벽(450→500)을 그대로 재현하려 했으나 재현 절차가 기록에 안 남아있어 3번의 방법론 오류(① 이벤트를 N에 맞춰 작게 만들어 부하가 안 생김 ② 매 단계 15,000석 구역을 통째로 재생성해 그 자체가 부하가 됨 ③ 단계 간 Redis FLUSHALL이 `SeatStatusRebuildService`의 재구성 락 경합을 매번 유발해 진짜 부하가 아닌 미니 장애가 섞임)를 겪은 뒤, 리셋 후 재구성 마커를 직접 미리 심어 락 경합을 없앤 절차로 최종 측정값을 확보했다(사용자와 함께 각 단계마다 원인 확인 후 다음 시도로 진행, 3번째 실패 시점엔 AskUserQuestion으로 계속 시도할지 확인받음). **정확한 450→500 절벽 모양 재현에는 실패했지만, 오류 없는 새 기준값(N=100부터 이미 저하)을 확보해 이걸 공식 기준선으로 채택**하기로 사용자 확인 완료 — 4-4 원본 수치는 문서에 그대로 남기되 이후 진단/튜닝은 이 절 기준.
+  - **원인 진단**: HikariCP 커넥션 풀(최대 10개)이 가장 먼저 병목이 된다 — N=100에서 이미 Tomcat 스레드는 60% 유휴(79/200)인데 DB 커넥션 대기는 67건. N=250부터 Tomcat도 포화(200/200)되지만 이건 원인이 아니라 결과(커넥션 대기 요청들이 스레드를 계속 붙잡음). GC 정지시간은 전체의 5% 미만이라 무관. `application.properties`에 `server.tomcat.mbeanregistry.enabled=true` 추가해야 `tomcat_threads_busy_threads` 등이 노출된다는 것도 이번에 발견(기본값 false라 이 지표가 아예 안 나가고 있었음).
+  - **구체적 낭비 지점 특정**: `GET /seats`가 호출될 때마다 등록 후 절대 안 바뀌는 좌석 배치도(최대 15,000행)를 매번 DB에서 다시 SELECT하고 있었다.
+  - **튜닝(사용자 지적 반영)**: 사용자가 "원인이 캐싱 문제면 근본적으로 코드를 고쳐야 하지 않냐"고 지적 — `SeatCatalogRepository`(신규, `domain/seat/repository`) 추가, 이벤트 등록 시 좌석 배치도를 DB에서 딱 한 번 읽어 Redis(`seat_catalog:{sectionId}`, List)에 캐싱하고 `GET /seats`는 이후 캐시만 읽는다(캐시 미스 시 DB 폴백 + 재채움, `SeatStatusRebuildService`와 같은 자가복구 패턴). 이벤트 전체교체/삭제 시 캐시도 함께 정리. 기존 자동 테스트 17개 전부 통과.
+  - **Before/After 결과**: N=100~450 구간 seat-hold P95 32~46% 개선(2,098→1,123ms @N=100 등). **다만 N=500은 여전히 9초대(-13%뿐)**, HikariCP pending도 N=100에서 오히려 67→91로 늘었다 — 좌석 조회가 빨라지며 사용자들이 좌석 잡기/결제 요청(둘 다 DB 커넥션 사용) 단계에 더 촘촘히 몰렸기 때문(병목 하나를 없앴지만 DB 커넥션 풀 자체가 여전히 상한). "부분 개선, 근본 해결 아님"이 정직한 결론.
+  - **다음 후보(미실행)**: HikariCP 풀 크기(10→20) 추가 튜닝 테스트. 스크린샷: `.claude/screenshots/tests/capacity-limit/`(Before 2026-09-05 19:42:00~19:49:45 KST, After 20:28:22~20:34:25 KST).
+  - **참고(도구 버그, 이번에 발견)**: 이 PC의 Git Bash `date` 명령이 `TZ=Asia/Seoul`을 인식 못 해 UTC를 "GMT"로 잘못 표시(9시간 밀림) — 호스트 기본 로컬 시간대가 이미 KST라 `TZ=` 없이 `date -d @epoch`를 쓰는 게 정답. 스크린샷 시간 범위를 처음에 9시간 잘못 안내했다가 사용자가 지적해 정정함.
+
+- **2026-09-05 (같은 세션 이어서)**: **트랜잭션 범위 축소 시도 — 코드는 채택, 로컬 측정은 새 병목(Redis)으로 중단(`test-results.md` 4-6).** 사용자가 "캐싱 말고 근본적으로 코드를 더 손볼 곳 없냐"고 질문 → `SeatService.hold()`/`findActiveHold()`와 `ReservationService.requestPayment()`가 메서드 전체를 `@Transactional`로 감싸 DB와 무관한 Redis 호출(입장 토큰 검증, 그룹 홀드 락 획득 — 경합 시 최대 3초 대기)까지 DB 커넥션을 붙잡고 있던 걸 발견. DB가 실제 필요한 구간만 남기고 나머지를 트랜잭션 밖으로 뺌(`requestPayment`는 신규 `TransactionTemplate` 빈으로 쓰기 구간만 프로그래밍 방식 트랜잭션으로 좁힘, 좌석 만료 스케줄 갱신은 원자성 때문에 그대로 안에 둠).
+  - **사용자가 "위험 없다"는 제 말에 문제 제기** → 재확인 후 "위험 0을 장담할 수 없다, 테스트로 검증해야 확신 가능"으로 정정. 실제로 `gradlew test` 첫 실행에서 17개 중 12개가 `LazyInitializationException`으로 실패(트랜잭션이 짧아지며 `seat.getSection()` 지연 로딩 시점에 세션이 이미 닫혀있었음) — `SeatRepository`에 `JOIN FETCH` 쿼리 추가로 해결, 17개 전부 재통과. **미리 경고했던 위험이 실제로 발생하고 잡힌 사례.**
+  - **Before/After 재측정 결과는 개선이 아니라 새 병목 노출**: N=350~500에서 실패(KO)가 새로 발생(N=500 878건) — 원인은 `Redis command timed out after 2 second(s)`. DB 병목을 없애자 요청이 훨씬 촘촘하게 Redis로 몰렸는데, 리허설 환경이 Redis를 0.5 vCPU로 작게 제한해둔 게 새 병목이 됨. Redis를 1.0 vCPU로 올려 재측정했지만 KO가 안 줄어(오히려 소폭 증가, 910건) — Redis가 싱글 스레드라 CPU를 늘려도 처리량이 비례해 안 늘어난다는 뜻. **사용자가 "시간 없다, 테스트하고 개선 다 해야 한다"고 확인** → 여기서 로컬 튜닝은 중단하기로 결정, Redis 설정 원복(0.5 vCPU).
+  - **최종 결론**: 트랜잭션 범위 축소 코드는 구조적으로 옳은 개선이라 그대로 채택하되(테스트로 안전성 검증 완료), 그 효과는 로컬 리허설 규모(Redis 0.5~1 vCPU)에서는 측정 불가 — AWS 재측정(관리형 Redis 또는 더 넉넉한 vCPU)에서 다시 봐야 진짜 효과를 알 수 있음.
+  - 스크린샷은 이번 라운드(트랜잭션 축소)는 실패(KO) 위주라 캡처하지 않음 — Before/After(캐싱) 세트만 `capacity-limit/`에 유지.
+
 ## 다음 작업
 
 ### ⏭️ 이어서 할 것 (2026-09-05 — **오늘 안에 ③~⑥ 전부 끝내는 게 목표**, 사용자 확정)
@@ -288,7 +302,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 ### 시점이 정해진 결정 (해당 주차 되면 확정)
 
 - **~~분산락 기술~~ → Redisson RLock 채택 확정 (2026-09-03)**. 벤치마크 결과: 성능 동등(처리량·Global P99), 유일 차이는 DB 락의 HikariCP pending 147(Redisson 0). 우리는 Redis가 이미 코어라 "20% 이내 → DB 락" tie-breaker의 근거가 안 맞음 + DB 락은 커넥션 고갈 리스크. 상세 `test-results.md` 3번·`decisions.md` 2번. 선행 수정(DB 락 3초 timeout + `GROUP_HOLD_LOCK_TIMEOUT` 매핑)은 커밋 `8570d91`.
-- **대기열 이탈률 섞은 부하테스트 시나리오**(decisions.md 4번, 2026-08-27 확인): 대기열 이탈자가 있어도 뒤쪽 순번이 밀리지는 않는 것은 코드로 확인됨(`EntryTokenScheduler`가 고정 인원만큼 무조건 빼고 대기열에서 제거). 다만 `queue.admit-count`가 이탈률을 고려하지 않은 고정값이라, 이탈률이 높으면 실사용자 입장 처리가 희석돼 체감 대기시간이 늘어날 수 있음 — 3주차 Gatling 부하테스트에 이탈률을 섞은 시나리오를 추가해 실측 예정
+- **~~대기열 이탈률 섞은 부하테스트 시나리오~~ → 실측 완료 (2026-09-05, `test-results.md` 5-1)**. `GoldenPathSimulation`에 `dropout.ratio` 파라미터 추가(진입만 하고 폴링 안 하는 이탈자 흉내). 실사용자 60명 고정, 이탈률 0/30/50%로 전체 진입 인원만 늘려 재보니(60/86/120명) 실사용자 평균 폴링 횟수가 1.00→1.81→1.83회로 최대 83% 증가 — 가설(이탈률이 실사용자 체감 대기를 늘린다) 확인됨. 오버셀 0으로 정합성 무관, 순수 UX 지표.
 - **architecture.md "인프라 구성" 표 추가**: classq(`all/classq/.claude/docs/architecture.md`)처럼 인프라 구성 표를 별도로 추가하기로 확인됨. 인프라 도입 여부는 2026-08-27에 확정(decisions.md 10번, EKS/ElastiCache/MSK/CloudWatch 미도입)됐으니 실제 배포 단계에서 표를 채운다
 - **AWS 인스턴스 스펙 확정**(`.claude/docs/aws-spec.md`, 2026-08-28 신규): 계열은 m계열로 방향 확정(A·B 섹션 작성 완료 — classq는 앱 전용 c계열이지만 우리는 EC2 한 대에 Boot+Redis+Kafka+Connect+Nginx 공존이라 RAM도 병목). 잠정 `m6i.xlarge` / RDS `db.m6i.large`(DB 락 채택 시 `db.r6i.large`). 실제 크기·성능 예측·SLO(C·D·E)는 **로컬 Gatling 부하테스트 실측 후** classq와 같은 방식으로 채운다 — 아래 "성능/처리량 목표치"도 그때 함께 닫힌다
 
