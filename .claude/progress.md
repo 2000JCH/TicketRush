@@ -222,7 +222,7 @@ AWS 설정은 **EC2 + RDS만이 아님**. 순서:
 - `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
 - 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
 
-**Phase 2 (진행 중) — 실행:** test-plan.md 2번 카오스 2개(**①Redis A-1 / ②Kafka A-2**) + **3번 분산락 벤치마크(→ Redisson 채택) 모두 완료 2026-09-03** → **4번 한계 테스트(리허설 스택 `docker-compose.rehearsal.yml`) — 다음** → AWS 배포 → AWS 재측정. 절차·합격 기준은 전부 test-plan.md에 있음.
+**Phase 2 — 전부 완료.** test-plan.md 2번 카오스 2개(①Redis A-1 / ②Kafka A-2, 로컬 2026-09-03 + **AWS 재측정 2026-09-06**) + 3번 분산락 벤치마크(→ Redisson 채택, 2026-09-03) + 4번 한계 테스트(로컬 리허설 2026-09-04~05 + **AWS 재측정 2026-09-06**) + AWS 배포(2026-09-06) 전부 끝났다. 상세는 아래 2026-09-06 항목.
 
 **일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
 
@@ -288,6 +288,18 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **코드/설정**: `application.properties`에 P99 히스토그램+SLO 버킷, `build.gradle`에 Gatling 플러그인, `src/gatling/java/simulation/GoldenPathSimulation.java`, `grafana/dashboards/ticketrush.json`+`grafana/provisioning/dashboards/dashboard.yml`+`docker-compose.yml` 대시보드 마운트, 스크립트 4종(`seed-load-test.ps1`·`run-gatling.ps1`·`chaos-redis.ps1`·`chaos-kafka.ps1`).
   - **검증**: Gatling 5·8 유저 스모크 → KO 0 전 스텝 통과. Grafana 대시보드 4패널 쿼리 실데이터 반환 확인. Pumba redis stop→restart→PING 복구 확인. `gatlingClasses` 컴파일 통과.
   - **다음(Phase 2)**: 두 카오스 시나리오 실제 실행. 그 전 또는 부하테스트 착수 시 **DB 비관적 락 timeout 선행 수정**(위 "시점이 정해진 결정 > 분산락 기술" 참고).
+
+- **2026-09-06**: **AWS 배포 + 재측정(부하·한계·카오스 2종) 완료 — 3주차 마지막 항목 종료.** IAM 유저 `ticketrush-deploy`로 CLI 연결 확인(계정 가입·`aws configure`는 전날 완료된 상태였음)부터 시작해, 실측까지 전부 이 세션에서 끝냈다. 상세 수치는 `test-results.md` 5·6번, `aws-spec.md` D·E 참고 — 여기는 과정과 결정 위주로 남긴다.
+  - **예산 알림**: 실제 리소스 생성 전에 AWS Budgets로 월 $10 기준(80%·100%) 이메일 알림 설정(콘솔에서 사용자가 직접 — IAM 유저에 `budgets:*` 권한이 없어 CLI로는 못 만듦, 콘솔 기본 템플릿에 실제 비용의 85%/예상 100%/실제 100% 세 알림이 자동 구성됨). 실측 단가도 확인: `m6i.xlarge` $0.236/시간, `db.m6i.large` $0.236/시간(둘 다 서울 리전, AWS 공식 가격 파일로 직접 확인) — 합 시간당 약 640원.
+  - **네트워크/보안**: default VPC(4개 AZ 서브넷) 그대로 사용. 보안그룹 2개(`ticketrush-ec2-sg`: SSH는 개발 PC IP만, Nginx 80·앱 직접 접근용 8080·모니터링용 3000/9090은 개발 PC IP 한정 / `ticketrush-rds-sg`: 3306은 EC2 보안그룹에서만). 키페어(`ticketrush-key`)는 레포 밖 `~/.ssh/`에 저장.
+  - **RDS binlog 함정(실제로 겪음)**: 처음에 비용 절감 목적으로 `--backup-retention-period 0`(자동 백업 끔)으로 RDS를 만들었는데, **RDS MySQL은 자동 백업이 꺼지면 binlog도 함께 꺼져 Debezium이 아예 못 읽는다**는 걸 뒤늦게 발견 — 커스텀 파라미터 그룹(`binlog_format=ROW`, `binlog_row_image=full`)을 만들고 백업 보관을 1일로 다시 켜서 해결(재부팅 불필요, 다이나믹 파라미터라 즉시 적용됨). 마스터 계정에 `GRANT REPLICATION CLIENT, REPLICATION SLAVE` 직접 부여.
+  - **배포 구성 결정**: 프론트엔드도 같이 배포하기로 확정(비용 차이 없고, 나중에 실시간 시연할 때 로컬을 안 띄워도 되는 이점 — 사용자 확인). 로컬 `docker-compose.yml`을 그대로 안 쓰고 **AWS 전용 `docker-compose.aws.yml`을 신규 작성**(mysql 서비스 제거, RDS 접속 정보는 compose 변수 치환으로 주입, `app` 서비스는 `Dockerfile`로 빌드, nginx는 `nginx/nginx.aws.conf` 신규 — 정적 파일(`ticketrush-frontend/dist`) 서빙 + `/api/` 리버스프록시 동시 처리). 코드는 git이 아니라 tar+scp로 EC2에 직접 전송(레포가 public이라 다음엔 `git clone`도 가능).
+  - **함정(실제로 겪음) — Nginx rate limit이 한계테스트를 막음**: 처음에 Gatling을 Nginx(포트 80) 경유로 쐈더니 대기열 진입 API의 rate limit(5r/s, burst 10)에 걸려 500명 중 489명이 즉시 429 — 로컬 한계테스트도 이 이유로 앱 컨테이너에 직접 쐈었다는 걸 뒤늦게 상기하고 앱 포트(8080, 개발 PC IP 한정으로 오픈)에 직접 쏘는 것으로 재실행해 해결.
+  - **모니터링**: decisions.md 10번은 "Prometheus/Grafana는 로컬 전용"이었으나, 스크린샷 증거를 다른 로컬 테스트와 같은 형식(그라파나 4패널)으로 남기기 위해 **이번 측정 세션에 한해 예외적으로 AWS에도 임시로 추가**(사용자 확인) — `prometheus/prometheus.aws.yml`(스크레이프 대상만 `app:8080`으로 수정) 신규.
+  - **실측 결과 요약**(상세는 test-results.md): 동시 300명 목표 SLO 통과(P95 1,512ms). 다만 **250~300명대에서 이미 절벽이 시작**(로컬 리허설의 460~480명보다 훨씬 이름) — 원인은 HikariCP가 아니라 **Redis 명령 타임아웃**(app·Kafka와 같은 EC2 박스에서 CPU 경쟁). "vCPU를 2배로 늘리면 한계도 오를 것"이라던 사전 기대가 실측으로 틀렸음이 확인된, 원인까지 특정된 사례. 카오스 A-1(Redis 61초 다운)·A-2(Kafka 92초 다운)는 로컬과 대등하거나 일부 더 나은 결과(Kafka는 커넥터 수동 재시작 없이 자동 복구)로 전부 통과, 오버셀은 이번 세션 전체(부하+카오스, 누적 2,000명+) 0건.
+  - **카오스는 원래 계획에 없었다**: decisions.md 10번은 "카오스는 로컬만"이었으나, 로컬 결과를 실제 배포 환경에서도 확신 있게 말할 수 있어야 한다는 사용자 판단으로 이번 세션에서 범위를 넓혀 AWS에서도 재실행하기로 확정(2026-09-06).
+  - **스크린샷**: `.claude/screenshots/tests/aws-remeasure/{load-test,capacity-limit,a1-redis-down,a2-kafka-down}/` 4개 폴더, 로컬 테스트들과 같은 파일명 규칙(`4패널_전체사진.png` 등)으로 정리.
+  - **다음으로 미룬 것**: EC2/RDS 종료(비용 관리, 사용자 확인 후 진행 예정), 새로 생긴 배포 파일들(`docker-compose.aws.yml`, `nginx/nginx.aws.conf`, `prometheus/prometheus.aws.yml`) 커밋 여부.
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
