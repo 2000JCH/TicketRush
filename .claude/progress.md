@@ -299,7 +299,23 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **실측 결과 요약**(상세는 test-results.md): 동시 300명 목표 SLO 통과(P95 1,512ms). 다만 **250~300명대에서 이미 절벽이 시작**(로컬 리허설의 460~480명보다 훨씬 이름) — 원인은 HikariCP가 아니라 **Redis 명령 타임아웃**(app·Kafka와 같은 EC2 박스에서 CPU 경쟁). "vCPU를 2배로 늘리면 한계도 오를 것"이라던 사전 기대가 실측으로 틀렸음이 확인된, 원인까지 특정된 사례. 카오스 A-1(Redis 61초 다운)·A-2(Kafka 92초 다운)는 로컬과 대등하거나 일부 더 나은 결과(Kafka는 커넥터 수동 재시작 없이 자동 복구)로 전부 통과, 오버셀은 이번 세션 전체(부하+카오스, 누적 2,000명+) 0건.
   - **카오스는 원래 계획에 없었다**: decisions.md 10번은 "카오스는 로컬만"이었으나, 로컬 결과를 실제 배포 환경에서도 확신 있게 말할 수 있어야 한다는 사용자 판단으로 이번 세션에서 범위를 넓혀 AWS에서도 재실행하기로 확정(2026-09-06).
   - **스크린샷**: `.claude/screenshots/tests/aws-remeasure/{load-test,capacity-limit,a1-redis-down,a2-kafka-down}/` 4개 폴더, 로컬 테스트들과 같은 파일명 규칙(`4패널_전체사진.png` 등)으로 정리.
-  - **다음으로 미룬 것**: EC2/RDS 종료(비용 관리, 사용자 확인 후 진행 예정), 새로 생긴 배포 파일들(`docker-compose.aws.yml`, `nginx/nginx.aws.conf`, `prometheus/prometheus.aws.yml`) 커밋 여부.
+  - **이 세션 안에서 마저 처리함**: 측정 종료 후 EC2/RDS 둘 다 완전히 삭제(비용 정리, 보안그룹·키페어·서브넷그룹·파라미터그룹은 재구축을 빠르게 하려고 남겨둠). 배포 파일·문서·스크린샷은 커밋 2개로 분리해 완료(`d6fbab9` feat(deploy), `696eadc` docs) — push는 사용자가 직접.
+
+- **2026-09-06 (저녁)**: **로컬 시연 준비 — 프론트 PortOne 결제창 연동 + "A그룹" 회원 화면 개선.** 사용자가 로컬에서 시연 흐름을 돌려보며 부족한 부분을 정리해준 걸 반영했다.
+  - **PortOne 결제창 연동(로컬까지)**: `@portone/browser-sdk` 추가, 홀드 완료 패널에서 카드(토스페이먼츠)/카카오페이 선택 → `PortOne.requestPayment()` 호출. 백엔드 `GET /api/v1/payments/config`(storeId·채널키 2종 전달, `.env`의 `PORTONE_STORE_ID`/`CHANNEL_KEY_TOSS`/`CHANNEL_KEY_KAKAO` 사용) 신규, `ReservationResponse`에 `amount`·`orderName` 추가(프론트가 SDK에 그대로 전달). 리디렉션(모바일) 복귀 처리도 넣음. **"결제 완료" 최종 확정은 웹훅이 localhost로 못 와서 로컬에선 안 됨 — AWS 배포 후 검증**(다음 작업 4~5). 웹훅 서명 검증 실측 미확인 상태는 그대로.
+  - **A그룹 회원 화면**: (1) 내 예약에 콘서트명·좌석 번호 표시 — `ReservationDetailResponse`에 `eventName`·좌석목록(구역/행/번) 추가, 목록은 `ReservationSeatRepository.findAllWithSeatByReservationIdIn`(fetch join)으로 N+1 회피. (2) 내 정보 페이지(`/account`) 신규 — `GET /api/v1/accounts/me`(신규) → 이메일·회원구분·계정상태·가입일. (3) 좌석 홀드 화면: 홀드한 좌석 크게 표시 + **자동취소 카운트다운**(홀드 TTL 만료 시각 기준, 1초 갱신) + 페이지 이탈 시 홀드 자동 해제(사용자 확인).
+  - **검증**: `gradlew test` 17개 통과, 프론트 `tsc -b`/`vite build` 통과, `/accounts/me`·`/reservations/me`·`/payments/config` 스모크 OK.
+  - **B·C그룹(관리자 콘솔·주최자 콘서트 생성 UI)은 착수 안 함** — 사용자가 정리한 나머지 요청(주최자 승인 화면, 전체 회원 목록, 회원별 예매내역, 콘서트별 매출/좌석 판매현황 145/200, 계정 정지[소프트/하드 미결], 주최자 콘서트 생성+시간선택 UI). 원래 "관리자/주최자 화면은 범위 밖"이었고 4주차는 "새 기능 없음" 원칙이라, AWS 결제 검증·시연·포트폴리오 문서 일정과 조율 후 결정. 관리자/주최자 화면은 프론트에 role 정보가 없는 게(로그인 응답에 role 미포함) 선행 과제.
+  - **미결로 남은 것**: `payment.processing-timeout-millis`(placeholder) 확정 필요 — 카운트다운/결제 타임아웃의 실제 값. 계정 정지 방식(소프트 `SUSPENDED` 상태 vs 하드 삭제) 결정 필요.
+
+**다음 작업(2026-09-06 저녁/09-07 아침 예정, 사용자와 합의한 순서)**:
+1. ~~로컬 시연 흐름 테스트~~ / ~~프론트 수정(A그룹)~~ / ~~결제 SDK 연동(로컬)~~ — 완료(위 2026-09-06 저녁 항목)
+2. B·C그룹(관리자/주최자 화면) 범위·일정 결정
+3. AWS 재배포(EC2 `m6i.xlarge`+RDS `db.m6i.large` 재생성 — 보안그룹/키페어 남겨둬서 이번엔 더 빠름, 대략 25~35분 예상)
+4. AWS에서 결제 포함 전체 흐름 테스트 + 웹훅 서명 실측 검증
+5. AWS에서 정식 시연 녹화
+6. 지금까지 문서화한 내용을 합쳐 포트폴리오 파일 1개로 제작(`all/classq/.claude/정찬혁_ClassQ_포트폴리오.pdf` 형식 참고)
+7. 프로젝트 최종 마무리 시 `README.md` 갱신
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
