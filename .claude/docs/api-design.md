@@ -18,6 +18,7 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 | POST | /api/v1/auth/login | 로그인 (`PENDING` 계정은 `ACCOUNT_PENDING` 에러) | 없음 |
 | POST | /api/v1/auth/refresh | Access Token 재발급 (httpOnly Cookie의 Refresh Token을 Redis 저장값과 대조) | 없음 (Refresh Token Cookie 필요) |
 | POST | /api/v1/auth/logout | 로그아웃 (Redis `refresh_token:{accountId}` 삭제로 즉시 무효화) | 인증 필요 |
+| GET | /api/v1/accounts/me | 로그인한 본인 계정 정보 조회 ("내 정보" 화면용) | 인증 필요 |
 
 **회원가입 성공 응답** (201)
 ```json
@@ -34,6 +35,11 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 **로그인 실패 응답 (ORGANIZER 승인 대기 중)**
 ```json
 { "code": "ACCOUNT_PENDING", "message": "관리자 승인 대기 중입니다." }
+```
+
+**내 계정 정보 응답 (`GET /api/v1/accounts/me`)** — 관리자 화면에서 쓰는 `AccountResponse`와 같은 형태다. 비밀번호는 절대 담지 않는다. 경로가 `/auth/*`가 아니라 `/accounts/me`인 이유는 "인증"이 아니라 계정 조회이기 때문이며, 패키지는 CLAUDE.md 규칙대로 `domain/account`에 둔다.
+```json
+{ "accountId": 3, "email": "buyer@example.com", "role": "BUYER", "status": "ACTIVE", "createdAt": "2026-09-06T22:54:56" }
 ```
 
 ---
@@ -174,11 +180,19 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 
 | 메서드 | 엔드포인트 | 설명 | 권한 |
 |---|---|---|---|
-| POST | /api/v1/reservations | 결제 요청 (`PAYMENT_REQUESTED` 생성 + PG 호출) | 인증 + 입장 토큰 |
+| GET | /api/v1/payments/config | 프론트 PortOne SDK 호출용 `storeId`·채널키(카드/카카오페이) 조회 | 인증 필요 |
+| POST | /api/v1/reservations | 결제 요청 (`PAYMENT_REQUESTED` 생성) | 인증 + 입장 토큰 |
 | POST | /api/v1/payments/webhook | PG(포트원) 웹훅 수신 | 없음 (서명 검증) |
 | GET | /api/v1/reservations/me | 내 예약 목록 조회 | 인증 필요 |
 | GET | /api/v1/reservations/{reservationId} | 예약 상세/상태 조회 (결제 결과 폴링용) | 인증 필요 |
 | POST | /api/v1/reservations/{reservationId}/cancel | 예약 취소 (MVP: 전액 취소만, decisions.md 9번) | 인증 필요 |
+
+**결제창 연동 흐름(2026-09-06, 프론트 PortOne V2 SDK 연동)**: 프론트가 `GET /payments/config`로 `storeId`·채널키를 받고 → `POST /reservations`로 `PAYMENT_REQUESTED` 예약을 만들며 `pgPaymentId`·`amount`·`orderName`을 받아 → `PortOne.requestPayment()`로 결제창(카드=토스페이먼츠 채널 / 카카오페이=간편결제 채널)을 띄운다. 결제 완료/실패의 최종 확정은 SDK 콜백이 아니라 **포트원 웹훅**(`POST /payments/webhook`)으로 서버 상태가 바뀌고, 프론트는 `GET /reservations/{id}` 폴링으로 그 결과를 반영한다. **웹훅은 공개 URL이 필요해 localhost로는 도달하지 못한다 — 로컬 데모는 결제창까지만 확인되고, "결제 완료" 확정과 웹훅 서명 실측 검증은 AWS 배포 후에 한다**(progress.md 추적). `storeId`/채널키는 원래 브라우저에 노출되는 공개 식별자이고, 시크릿(`PORTONE_API_SECRET`/`PORTONE_WEBHOOK_SECRET`)은 이 응답에 포함하지 않는다.
+
+**PortOne SDK 설정 응답 (`GET /api/v1/payments/config`)**
+```json
+{ "storeId": "store-...", "cardChannelKey": "channel-key-...", "easyPayChannelKey": "channel-key-..." }
+```
 
 **결제 요청 body**
 ```json
@@ -193,29 +207,36 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 
 **결제 요청 응답 (즉시 반환 — 동기 구간, architecture.md 2-3 참고)**
 ```json
-{ "reservationId": 501, "status": "PAYMENT_REQUESTED", "pgPaymentId": "TICKETRUSH-501" }
+{ "reservationId": 501, "status": "PAYMENT_REQUESTED", "pgPaymentId": "TICKETRUSH-501", "amount": 300000, "orderName": "OO 콘서트" }
 ```
 - `pgPaymentId`(3주차 결제 연동에서 추가): 프론트가 포트원 V2 결제창 SDK를 호출할 때 `paymentId`로 그대로 넘겨야 하는 값. 서버가 `"TICKETRUSH-{reservationId}"` 형식으로 생성한다(db-schema.md `reservation.pg_payment_id` 참고).
+- `amount`·`orderName`(2026-09-06 결제창 연동에서 추가): 프론트가 `PortOne.requestPayment()`의 `totalAmount`/`orderName`으로 그대로 넘긴다. 금액을 프론트에서 다시 계산하면 서버 확정값과 어긋날 수 있어 서버가 확정한 값을 함께 내려준다. `orderName`은 이벤트명이다.
 
 **예약 상세 조회 응답 (결제 결과는 클라이언트가 이 엔드포인트를 폴링해서 확인, `GET /reservations/{id}`와 `GET /reservations/me`가 공용)**
 ```json
 {
   "reservationId": 501,
   "eventId": 1,
+  "eventName": "OO 콘서트",
   "status": "PAYMENT_CONFIRMED",
   "quantity": 2,
   "amount": 300000,
+  "seats": [
+    { "sectionName": "R석", "rowNo": 3, "seatNo": 1 },
+    { "sectionName": "R석", "rowNo": 3, "seatNo": 2 }
+  ],
   "requestedAt": "2026-09-01T20:01:03",
   "confirmedAt": "2026-09-01T20:03:12"
 }
 ```
 - `status`는 db-schema.md `reservation.status`와 동일한 값(`PAYMENT_REQUESTED`/`PAYMENT_CONFIRMED`/`PAYMENT_FAILED`/`SEAT_RELEASED`)이다. `reservationId`는 결제 요청(`POST /api/v1/reservations`) 응답에서 처음 발급된다 — 좌석만 찜한 `SEAT_HELD` 단계는 DB 행이 아직 없어(db-schema.md 설계 원칙 참고) 조회할 `reservationId` 자체가 존재하지 않는다. `GET /reservations/me`는 이 형태의 배열을 반환한다(구현 단계에서 확정 — 원래 예시엔 `eventId`/`quantity`/`requestedAt`이 없었으나, 목록에서 "어느 이벤트의 몇 매짜리 예약인지" 구분하려면 필요해 추가함).
+- `eventName`·`seats`(2026-09-06 "내 예약" 화면 개선에서 추가): "어느 콘서트의 몇 번 자리인지"를 화면에서 보여주기 위함. `seats`는 지정석 예약의 개별 좌석(구역명·행·번, 행-번 순 정렬)이고, **스탠딩 예약은 빈 배열**이라 `quantity`로만 표시한다. 목록 조회(`/me`)는 좌석을 예약별로 한 번에 가져오는 fetch join으로 N+1을 피한다.
 
 **예약 취소 응답**: 위와 동일한 상세 조회 형식을 그대로 반환한다(`status: "SEAT_RELEASED"`). `PAYMENT_CONFIRMED` 상태에서만 취소할 수 있고, 그 외 상태에서 시도하면 `RESERVATION_NOT_CANCELLABLE`(409)이다.
 
 **웹훅 요청 (`POST /api/v1/payments/webhook`)**: 포트원 V2가 [Standard Webhooks](https://www.standardwebhooks.com/) 스펙을 쓰는 것으로 확인해(1주차 스모크테스트 로그에 `webhook-signature` 헤더가 그대로 찍힘) 그 방식으로 서명 검증을 구현했다 — `webhook-id`/`webhook-timestamp`/`webhook-signature` 헤더 + HMAC-SHA256(secret은 `whsec_` 접두사 + base64), 타임스탬프 5분 이상 벗어나면 서명이 맞아도 거절(재전송 공격 방지). **시크릿은 2026-08-27에 사용자가 콘솔에서 찾아 `.env`에 반영했지만, 실결제 이벤트로 이 가정을 검증한 적은 아직 없다**(콘솔 "호출 테스트"는 서명 헤더 없이 옴) — 재확인 필요(progress.md 추적). 시크릿이 비어있으면(`.env`에 `PORTONE_WEBHOOK_SECRET` 없음) 모든 웹훅을 거절한다(빈 시크릿으로 통과시키는 게 인증을 끈 것보다 더 위험하기 때문).
 - 처리하는 `type`: `Transaction.Paid` → `confirmPayment`(→ `PAYMENT_CONFIRMED`), `Transaction.Failed` → `markPaymentFailed`(→ `PAYMENT_FAILED`, 이후 Kafka Consumer가 `releaseAfterFailure`를 트리거해 좌석을 반납한다, 아래 "Kafka exactly-once 연동" 참고). 그 외 `type`(`Transaction.Ready`/`Transaction.Cancelled` 등)은 로그만 남기고 무시한다.
-- 웹훅 body의 `data.paymentId`로 `reservation.pg_payment_id`를 역조회해 어느 예약인지 찾는다. **단순화(알려진 한계)**: 웹훅 body의 값을 그대로 신뢰한다 — 더 엄격하게 하려면 포트원 결제 조회 API(GetPayment)로 서버 대 서버 재검증을 해야 하지만, 실제 결제 채널(카드/카카오페이) 프론트 연동이 아직 없어 검증할 방법이 없어 미룬다.
+- 웹훅 body의 `data.paymentId`로 `reservation.pg_payment_id`를 역조회해 어느 예약인지 찾는다. **단순화(알려진 한계)**: 웹훅 body의 값을 그대로 신뢰한다 — 더 엄격하게 하려면 포트원 결제 조회 API(GetPayment)로 서버 대 서버 재검증을 해야 한다. 프론트 결제창 SDK는 2026-09-06에 연동됐지만 로컬은 웹훅이 도달하지 못해 실웹훅 자체가 아직 미검증이라(위 "결제창 연동 흐름" 참고), 재검증은 AWS에서 실웹훅이 확인된 뒤에 붙인다(`PORTONE_API_SECRET`은 `.env`에 준비됨).
 
 **Kafka exactly-once 연동(3주차, decisions.md 6번)**: `markPaymentFailed`가 같은 트랜잭션에서 `outbox_events`(`event_type=PAYMENT_FAILED`)에도 INSERT하고, Debezium(Outbox Event Router SMT)이 이를 감지해 Kafka 토픽 `ticketrush.reservation.events`로 발행한다. Spring Kafka `@KafkaListener`(`PaymentFailedConsumer`)가 이를 소비해 `releaseAfterFailure`(좌석 반납)를 호출한다 — decisions.md 5번 Choreography(중앙 조율자 없이 Kafka Consumer로 다음 단계를 잇는 방식)를 그대로 구현한 것이며, `markPaymentFailed`/`releaseAfterFailure`를 애초에 두 메서드로 나눠뒀던 이유가 바로 이것이다. `PAYMENT_CONFIRMED` 쪽은 정산/알림 기능 자체가 보류 중이라(아래 "남은 항목" 참고) outbox 이벤트를 만들지 않는다.
 - Kafka/Debezium은 at-least-once 전달만 보장하지만, `releaseAfterFailure`가 이미 상태 체크(`status == PAYMENT_FAILED`)로 멱등하므로 재전달돼도 안전하다 — "at-least-once + 멱등 소비자"로 exactly-once 효과를 얻는다. decisions.md 6번이 말하는 진짜 Kafka 트랜잭션 API(consume-transform-**produce**)는 이 컨슈머처럼 재발행 단계가 없는 흐름에는 쓰지 않는다.
