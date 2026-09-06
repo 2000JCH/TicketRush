@@ -13,6 +13,14 @@ public interface ReservationSeatRepository extends JpaRepository<ReservationSeat
     List<ReservationSeat> findAllByReservationId(Long reservationId);
 
     /**
+     * 내 예약 목록(GET /reservations/me)에서 여러 예약의 좌석을 한 번에 가져온다 — 예약마다
+     * 좌석 쿼리를 날리는 N+1을 피하려고 seat·section을 fetch join으로 함께 로딩한다.
+     */
+    @Query("SELECT rs FROM ReservationSeat rs JOIN FETCH rs.seat s JOIN FETCH s.section "
+            + "WHERE rs.reservation.id IN :reservationIds")
+    List<ReservationSeat> findAllWithSeatByReservationIdIn(@Param("reservationIds") List<Long> reservationIds);
+
+    /**
      * db-schema.md 6번의 `uq_active_seat`(생성 컬럼 유니크 제약)를 애플리케이션 레벨로 대체한
      * 2차 방어선(CLAUDE.md, 사용자 확인 완료) — 같은 좌석에 진행 중인(PAYMENT_REQUESTED/CONFIRMED)
      * 행이 이미 있는지 조회한다.

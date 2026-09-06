@@ -26,7 +26,9 @@ import com.ticketrush.ticketrush.global.exception.ErrorCode;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -206,15 +208,26 @@ public class ReservationService {
 
     @Transactional(readOnly = true)
     public List<ReservationDetailResponse> findMyReservations(Long accountId) {
-        return reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId).stream()
-                .map(ReservationDetailResponse::of)
+        List<Reservation> reservations =
+                reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId);
+        if (reservations.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = reservations.stream().map(Reservation::getId).toList();
+        Map<Long, List<ReservationSeat>> seatsByReservation =
+                reservationSeatRepository.findAllWithSeatByReservationIdIn(ids).stream()
+                        .collect(Collectors.groupingBy(rs -> rs.getReservation().getId()));
+        return reservations.stream()
+                .map(r -> ReservationDetailResponse.of(
+                        r, seatsByReservation.getOrDefault(r.getId(), List.of())))
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public ReservationDetailResponse findDetail(Long accountId, Long reservationId) {
         Reservation reservation = findOwnedReservation(accountId, reservationId);
-        return ReservationDetailResponse.of(reservation);
+        return ReservationDetailResponse.of(
+                reservation, reservationSeatRepository.findAllByReservationId(reservationId));
     }
 
     /**
@@ -240,7 +253,7 @@ public class ReservationService {
                 reservation.getEvent().getId(), reservation.getSection().getId(), seatIds, reservation.getQuantity());
         reservation.release();
 
-        return ReservationDetailResponse.of(reservation);
+        return ReservationDetailResponse.of(reservation, seats);
     }
 
     private Reservation findOwnedReservation(Long accountId, Long reservationId) {

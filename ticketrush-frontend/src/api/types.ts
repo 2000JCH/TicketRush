@@ -94,6 +94,15 @@ export interface ReservationResponse {
   reservationId: number;
   status: "PAYMENT_REQUESTED";
   pgPaymentId: string;
+  amount: number;
+  orderName: string;
+}
+
+/** 프론트가 PortOne 브라우저 SDK를 호출할 때 필요한 공개 식별자 (GET /api/v1/payments/config). */
+export interface PaymentConfig {
+  storeId: string;
+  cardChannelKey: string;
+  easyPayChannelKey: string;
 }
 
 export type ReservationStatus =
@@ -102,14 +111,32 @@ export type ReservationStatus =
   | "PAYMENT_FAILED"
   | "SEAT_RELEASED";
 
+export interface ReservationSeatInfo {
+  sectionName: string;
+  rowNo: number;
+  seatNo: number;
+}
+
 export interface ReservationDetail {
   reservationId: number;
   eventId: number;
+  eventName: string;
   status: ReservationStatus;
   quantity: number;
   amount: number;
+  seats: ReservationSeatInfo[];
   requestedAt: string;
   confirmedAt: string | null;
+}
+
+export type AccountRole = "BUYER" | "ORGANIZER" | "ADMIN";
+
+export interface AccountInfo {
+  accountId: number;
+  email: string;
+  role: AccountRole;
+  status: "PENDING" | "ACTIVE";
+  createdAt: string;
 }
 
 export interface ApiErrorBody {
