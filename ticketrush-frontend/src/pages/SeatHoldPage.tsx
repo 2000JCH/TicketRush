@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { getEvent } from "../api/events";
 import { getSeats, holdSeats, releaseHold } from "../api/seats";
 import { getReservation, requestPayment } from "../api/reservations";
+import { VirtualizedSeatGrid } from "../components/VirtualizedSeatGrid";
 import { ApiError } from "../api/client";
 import { formatApiError } from "../api/errorMessage";
 import { clearEntryToken, getEntryToken } from "../lib/entryTokenStore";
@@ -217,87 +218,102 @@ export function SeatHoldPage() {
       {error && <p className="error">{error}</p>}
       {!event && !error && <p>불러오는 중...</p>}
 
-      {event && !hold && (
-        <>
-          <h2>구역 선택</h2>
-          <ul className="section-list">
-            {event.sections.map((s) => (
-              <li key={s.id}>
-                <button
-                  className={section?.id === s.id ? "selected" : ""}
-                  onClick={() => selectSection(s)}
-                >
-                  {s.name} ({s.type === "SEATED" ? "지정석" : "스탠딩"}) —{" "}
-                  {s.price.toLocaleString()}원
+      {event && (
+        <div className="seat-hold-layout">
+          <div className="seat-hold-main">
+            {!hold && (
+              <>
+                <h2>구역 선택</h2>
+                <ul className="section-list">
+                  {event.sections.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        className={section?.id === s.id ? "selected" : ""}
+                        onClick={() => selectSection(s)}
+                      >
+                        {s.name} ({s.type === "SEATED" ? "지정석" : "스탠딩"}) —{" "}
+                        {s.price.toLocaleString()}원
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+
+                {section?.type === "SEATED" && (
+                  <>
+                    <h2>좌석 선택 (최대 {MAX_QUANTITY}석)</h2>
+                    {!seats && <p>좌석 정보를 불러오는 중...</p>}
+                    {seats && (
+                      <VirtualizedSeatGrid
+                        seats={seats}
+                        selectedSeatIds={selectedSeatIds}
+                        onToggle={toggleSeat}
+                      />
+                    )}
+                  </>
+                )}
+
+                {section?.type === "STANDING" && (
+                  <>
+                    <h2>수량 선택</h2>
+                    <label>
+                      매수
+                      <select
+                        value={standingQuantity}
+                        onChange={(e) => setStandingQuantity(Number(e.target.value))}
+                      >
+                        <option value={1}>1매</option>
+                        <option value={2}>2매</option>
+                      </select>
+                    </label>
+                  </>
+                )}
+              </>
+            )}
+
+            {hold && (
+              <p className="muted">
+                홀드한 좌석은 오른쪽 패널에서 결제를 진행하거나 취소할 수 있습니다.
+              </p>
+            )}
+          </div>
+
+          {/* 좌석이 많으면 그리드가 길어져 아래쪽 버튼까지 스크롤해야 하는 문제(사용자 지적,
+              2026-09-05) — 액션 버튼을 오른쪽 사이드바로 옮기고 sticky로 고정해 스크롤 중에도
+              항상 보이게 한다. */}
+          <aside className="seat-hold-sidebar">
+            {!hold && section?.type === "SEATED" && (
+              <>
+                <p>선택한 좌석: {selectedSeatIds.length} / {MAX_QUANTITY}석</p>
+                <button disabled={selectedSeatIds.length === 0 || busy} onClick={handleHold}>
+                  선택한 좌석 홀드하기 ({selectedSeatIds.length}석)
                 </button>
-              </li>
-            ))}
-          </ul>
-
-          {section?.type === "SEATED" && (
-            <>
-              <h2>좌석 선택 (최대 {MAX_QUANTITY}석)</h2>
-              {!seats && <p>좌석 정보를 불러오는 중...</p>}
-              <div className="seat-grid">
-                {seats?.map((seat) => (
-                  <button
-                    key={seat.seatId}
-                    disabled={seat.status !== "AVAILABLE" && !selectedSeatIds.includes(seat.seatId)}
-                    className={`seat ${seat.status.toLowerCase()} ${
-                      selectedSeatIds.includes(seat.seatId) ? "selected" : ""
-                    }`}
-                    onClick={() => toggleSeat(seat.seatId, seat.status)}
-                  >
-                    {seat.rowNo}-{seat.seatNo}
-                  </button>
-                ))}
-              </div>
-              <button
-                disabled={selectedSeatIds.length === 0 || busy}
-                onClick={handleHold}
-              >
-                선택한 좌석 홀드하기 ({selectedSeatIds.length}석)
-              </button>
-            </>
-          )}
-
-          {section?.type === "STANDING" && (
-            <>
-              <h2>수량 선택</h2>
-              <label>
-                매수
-                <select
-                  value={standingQuantity}
-                  onChange={(e) => setStandingQuantity(Number(e.target.value))}
-                >
-                  <option value={1}>1매</option>
-                  <option value={2}>2매</option>
-                </select>
-              </label>
+              </>
+            )}
+            {!hold && section?.type === "STANDING" && (
               <button disabled={busy} onClick={handleHold}>
                 홀드하기
               </button>
-            </>
-          )}
-        </>
-      )}
+            )}
 
-      {hold && (
-        <div className="hold-panel">
-          <h2>홀드 완료</h2>
-          <p>홀드 만료 시각: {new Date(hold.holdExpiresAt).toLocaleString()}</p>
-          <button disabled={busy} onClick={handleRequestPayment}>
-            결제 요청하기
-          </button>
-          <button disabled={busy} onClick={handleReleaseHold} className="secondary">
-            홀드 취소하고 다시 선택
-          </button>
+            {hold && (
+              <div className="hold-panel">
+                <h2>홀드 완료</h2>
+                <p>홀드 만료 시각: {new Date(hold.holdExpiresAt).toLocaleString()}</p>
+                <button disabled={busy} onClick={handleRequestPayment}>
+                  결제 요청하기
+                </button>
+                <button disabled={busy} onClick={handleReleaseHold} className="secondary">
+                  홀드 취소하고 다시 선택
+                </button>
+              </div>
+            )}
+
+            <p>
+              <Link to={`/events/${numericEventId}`}>← 이벤트 상세로</Link>
+            </p>
+          </aside>
         </div>
       )}
-
-      <p>
-        <Link to={`/events/${numericEventId}`}>← 이벤트 상세로</Link>
-      </p>
     </div>
   );
 }
