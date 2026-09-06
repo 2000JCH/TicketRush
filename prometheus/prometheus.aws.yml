@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 1s
+
+scrape_configs:
+  - job_name: ticketrush
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # AWS에서는 앱도 컨테이너라 도커 네트워크 안의 서비스명으로 가리킨다
+      # (로컬 prometheus.yml은 host.docker.internal:8080 — 호스트에서 도는 bootRun을 가리킴).
+      - targets:
+          - app:8080

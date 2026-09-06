@@ -1,0 +1,111 @@
+# AWS 배포용 Compose 파일 (decisions.md 10번: EC2 + Docker Compose + RDS).
+# MySQL은 RDS(관리형)를 쓰므로 mysql 서비스가 없고, Prometheus/Grafana는 로컬 전용
+# 결정(decisions.md 10번 후속)이라 여기 포함하지 않는다. docker-compose.yml(로컬용)과는
+# 완전히 분리된 독립 파일이다 — 로컬 개발에는 영향 없음.
+#
+# 사용법 (EC2 위에서):
+#   docker compose -f docker-compose.aws.yml up -d --build
+#   커넥터 등록은 scripts/register-outbox-connector.aws.sh 참고
+
+services:
+  redis:
+    image: redis:7.2
+    container_name: ticketrush-redis
+    command: redis-server --save ""
+    volumes:
+      - redis_data:/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: ticketrush-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      CLUSTER_ID: GQIZo3kUxRLhbn8NBZPs5Q
+
+  kafka-connect:
+    image: debezium/connect:2.6
+    container_name: ticketrush-kafka-connect
+    depends_on:
+      kafka:
+        condition: service_started
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: debezium-connect
+      CONFIG_STORAGE_TOPIC: debezium-configs
+      OFFSET_STORAGE_TOPIC: debezium-offsets
+      STATUS_STORAGE_TOPIC: debezium-status
+
+  app:
+    build:
+      context: ./ticketrush-backend
+    container_name: ticketrush-app
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+    env_file:
+      - ./ticketrush-backend/.env
+    environment:
+      TZ: Asia/Seoul
+      DB_URL: jdbc:mysql://${RDS_ENDPOINT}:3306/ticketrush?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&rewriteBatchedStatements=true
+      DB_USERNAME: ${RDS_USERNAME}
+      DB_PASSWORD: ${RDS_PASSWORD}
+      REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CONNECT_REST_URL: http://kafka-connect:8083
+    # 한계 테스트는 nginx의 대기열 진입 rate limit(5r/s)을 우회하려고 앱에 직접 쏜다
+    # (nginx.rehearsal.conf 주석과 동일 이유). 개발 PC IP에서만 열어둔 보안그룹 규칙과 짝.
+    ports:
+      - "8080:8080"
+
+  nginx:
+    image: nginx:1.27
+    container_name: ticketrush-nginx
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.aws.conf:/etc/nginx/nginx.conf:ro
+      - ./ticketrush-frontend/dist:/usr/share/nginx/html:ro
+
+  # AWS 재측정 결과를 로컬 다른 테스트들과 같은 형식(Grafana 패널 캡처)으로 남기기 위해
+  # 이번 측정 세션에서만 임시로 추가한다 — decisions.md 10번의 "모니터링은 로컬 전용" 원칙과는
+  # 별개로, 증거 형식을 다른 테스트 폴더와 맞추기 위한 일회성 예외(사용자 확인 완료, 2026-09-06).
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: ticketrush-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.aws.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: ticketrush-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  redis_data:
+  grafana_data:
