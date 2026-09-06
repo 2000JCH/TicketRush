@@ -1,20 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getEvent } from "../api/events";
 import { getSeats, holdSeats, releaseHold } from "../api/seats";
 import { getReservation, requestPayment } from "../api/reservations";
+import { getPaymentConfig } from "../api/payments";
 import { VirtualizedSeatGrid } from "../components/VirtualizedSeatGrid";
 import { ApiError } from "../api/client";
 import { formatApiError } from "../api/errorMessage";
 import { clearEntryToken, getEntryToken } from "../lib/entryTokenStore";
+import * as PortOne from "@portone/browser-sdk/v2";
 import type {
   EventDetail,
   EventSection,
+  PaymentConfig,
   ReservationDetail,
   ReservationResponse,
   SeatHoldResponse,
   SeatStatusItem,
 } from "../api/types";
+
+type PayMethod = "CARD" | "KAKAOPAY";
 
 const MAX_QUANTITY = 2;
 const POLL_INTERVAL_MS = 2000;
@@ -42,6 +47,16 @@ export function SeatHoldPage() {
   const [result, setResult] = useState<ReservationDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [payMethod, setPayMethod] = useState<PayMethod>("CARD");
+  const [paymentConfig, setPaymentConfig] = useState<PaymentConfig | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // 홀드 중이면 1초마다 현재 시각을 갱신해 "자동 취소까지 남은 시간"을 실시간으로 보여준다.
+  useEffect(() => {
+    if (!hold) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [hold]);
 
   useEffect(() => {
     if (!entryToken) {
@@ -51,7 +66,34 @@ export function SeatHoldPage() {
     getEvent(numericEventId)
       .then(setEvent)
       .catch((err) => setError(formatApiError(err)));
+    // 결제창 호출에 필요한 storeId/channelKey. 설정이 없으면(로컬 미설정) 결제창 없이 요청만 한다.
+    getPaymentConfig()
+      .then(setPaymentConfig)
+      .catch(() => setPaymentConfig(null));
   }, [numericEventId, entryToken, navigate]);
+
+  // PortOne 리디렉션 방식(주로 모바일)으로 결제 후 이 페이지로 복귀했을 때의 처리.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentId = params.get("paymentId");
+    if (!paymentId) return;
+    window.history.replaceState({}, "", window.location.pathname);
+    const code = params.get("code");
+    if (code) {
+      setError(`결제가 취소되었거나 실패했습니다: ${params.get("message") ?? code}`);
+      return;
+    }
+    const rid = Number(paymentId.replace("TICKETRUSH-", ""));
+    if (Number.isFinite(rid)) {
+      setReservation({
+        reservationId: rid,
+        status: "PAYMENT_REQUESTED",
+        pgPaymentId: paymentId,
+        amount: 0,
+        orderName: "",
+      });
+    }
+  }, []);
 
   // 결제 요청 직후 PG 웹훅(또는 카오스 테스트 등)으로 상태가 바뀔 때까지 결과 화면에서 폴링한다.
   useEffect(() => {
@@ -78,6 +120,24 @@ export function SeatHoldPage() {
       clearTimeout(timer);
     };
   }, [reservation, result]);
+
+  // 홀드만 잡고 결제 요청 전에 페이지를 벗어나면(로고/이벤트 상세로/뒤로가기 등) 좌석이
+  // TTL까지 잠긴 채로 남는다 — unmount 시 자동으로 홀드를 해제한다(사용자 확인, 2026-09-06).
+  const holdRef = useRef<SeatHoldResponse | null>(null);
+  const reservationRef = useRef<ReservationResponse | null>(null);
+  useEffect(() => {
+    holdRef.current = hold;
+  }, [hold]);
+  useEffect(() => {
+    reservationRef.current = reservation;
+  }, [reservation]);
+  useEffect(() => {
+    return () => {
+      if (holdRef.current && !reservationRef.current && entryToken) {
+        void releaseHold(numericEventId, entryToken).catch(() => {});
+      }
+    };
+  }, [numericEventId, entryToken]);
 
   function handleExpiredToken() {
     clearEntryToken(numericEventId);
@@ -156,6 +216,33 @@ export function SeatHoldPage() {
     }
   }
 
+  async function openPortOneCheckout(response: ReservationResponse) {
+    if (!paymentConfig?.storeId) return true; // 설정 없음 — 결제창 없이 요청만 (로컬)
+    const channelKey =
+      payMethod === "KAKAOPAY"
+        ? paymentConfig.easyPayChannelKey
+        : paymentConfig.cardChannelKey;
+    const portoneResponse = await PortOne.requestPayment({
+      storeId: paymentConfig.storeId,
+      channelKey,
+      paymentId: response.pgPaymentId,
+      orderName: response.orderName,
+      totalAmount: response.amount,
+      currency: "KRW",
+      payMethod: payMethod === "KAKAOPAY" ? "EASY_PAY" : "CARD",
+      ...(payMethod === "KAKAOPAY" ? { easyPayProvider: "KAKAOPAY" } : {}),
+      redirectUrl: `${window.location.origin}/events/${numericEventId}/seats`,
+    });
+    // 리디렉션 방식이면 여기 도달 전에 페이지를 떠난다. 프로미스로 돌아온 경우만 여기서 처리.
+    if (portoneResponse?.code != null) {
+      setError(
+        `결제가 취소되었거나 실패했습니다: ${portoneResponse.message ?? portoneResponse.code}`
+      );
+      return false;
+    }
+    return true;
+  }
+
   async function handleRequestPayment() {
     if (!section || !entryToken) return;
     setError(null);
@@ -182,6 +269,11 @@ export function SeatHoldPage() {
               },
               entryToken
             );
+
+      // 서버에 PAYMENT_REQUESTED 예약이 생긴 뒤 PG 결제창을 띄운다. 결제 완료/실패는 웹훅으로
+      // 서버 상태가 바뀌고, 아래 결과 화면이 GET /reservations/{id} 폴링으로 그걸 반영한다.
+      const ok = await openPortOneCheckout(response);
+      if (!ok) return;
       setReservation(response);
     } catch (err) {
       if (err instanceof ApiError && err.code === "ENTRY_TOKEN_EXPIRED") {
@@ -193,6 +285,21 @@ export function SeatHoldPage() {
       setBusy(false);
     }
   }
+
+  const heldSeatLabels =
+    hold && section?.type === "SEATED" && seats
+      ? seats
+          .filter((s) => selectedSeatIds.includes(s.seatId))
+          .map((s) => `${s.rowNo}-${s.seatNo}`)
+      : [];
+
+  const holdMsLeft = hold ? new Date(hold.holdExpiresAt).getTime() - nowMs : 0;
+  const holdCountdown =
+    holdMsLeft > 0
+      ? `${Math.floor(holdMsLeft / 60000)}분 ${String(
+          Math.floor((holdMsLeft % 60000) / 1000)
+        ).padStart(2, "0")}초 후 자동 취소`
+      : "홀드 시간이 만료되었습니다";
 
   if (reservation) {
     const status = result?.status ?? "PAYMENT_REQUESTED";
@@ -271,9 +378,22 @@ export function SeatHoldPage() {
             )}
 
             {hold && (
-              <p className="muted">
-                홀드한 좌석은 오른쪽 패널에서 결제를 진행하거나 취소할 수 있습니다.
-              </p>
+              <div className="held-seats">
+                <p className="muted">
+                  홀드한 좌석은 오른쪽 패널에서 결제를 진행하거나 취소할 수 있습니다.
+                </p>
+                <div className="held-seats-list">
+                  {section?.type === "SEATED" ? (
+                    heldSeatLabels.map((label) => (
+                      <span key={label} className="held-seat-chip">
+                        {label}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="held-seat-chip">스탠딩 {standingQuantity}매</span>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 
@@ -298,9 +418,34 @@ export function SeatHoldPage() {
             {hold && (
               <div className="hold-panel">
                 <h2>홀드 완료</h2>
-                <p>홀드 만료 시각: {new Date(hold.holdExpiresAt).toLocaleString()}</p>
+                <p className={holdMsLeft > 0 ? "hold-countdown" : "hold-countdown expired"}>
+                  {holdCountdown}
+                </p>
+                <p className="muted">만료 시각 {new Date(hold.holdExpiresAt).toLocaleTimeString()}</p>
+                {paymentConfig?.storeId && (
+                  <div className="pay-method">
+                    <label>
+                      <input
+                        type="radio"
+                        name="payMethod"
+                        checked={payMethod === "CARD"}
+                        onChange={() => setPayMethod("CARD")}
+                      />
+                      카드
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="payMethod"
+                        checked={payMethod === "KAKAOPAY"}
+                        onChange={() => setPayMethod("KAKAOPAY")}
+                      />
+                      카카오페이
+                    </label>
+                  </div>
+                )}
                 <button disabled={busy} onClick={handleRequestPayment}>
-                  결제 요청하기
+                  {paymentConfig?.storeId ? "결제하기" : "결제 요청하기"}
                 </button>
                 <button disabled={busy} onClick={handleReleaseHold} className="secondary">
                   홀드 취소하고 다시 선택

@@ -8,6 +8,7 @@ import { EventDetailPage } from "./pages/EventDetailPage";
 import { QueuePage } from "./pages/QueuePage";
 import { SeatHoldPage } from "./pages/SeatHoldPage";
 import { ReservationsPage } from "./pages/ReservationsPage";
+import { AccountPage } from "./pages/AccountPage";
 
 function App() {
   return (
@@ -52,6 +53,14 @@ function App() {
           element={
             <ProtectedRoute>
               <ReservationsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/account"
+          element={
+            <ProtectedRoute>
+              <AccountPage />
             </ProtectedRoute>
           }
         />

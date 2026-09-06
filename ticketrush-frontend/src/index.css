@@ -265,6 +265,81 @@ button.secondary {
   box-shadow: none;
 }
 
+.held-seats {
+  margin-top: 1rem;
+}
+
+.held-seats-list {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.held-seat-chip {
+  font-size: 1.3rem;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  background: #2a2af0;
+  color: white;
+  border-radius: 6px;
+}
+
+.pay-method {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.95rem;
+}
+
+.pay-method label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+}
+
+.hold-countdown {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #c0392b;
+  margin: 0;
+}
+
+.hold-countdown.expired {
+  color: #999;
+}
+
+.reservation-seats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.seat-tag {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.5rem;
+  background: #eef;
+  border-radius: 4px;
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.5rem 1.5rem;
+  margin: 1rem 0;
+}
+
+.info-list dt {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.info-list dd {
+  margin: 0;
+  font-weight: 500;
+}
+
 .queue-status {
   text-align: center;
   padding: 2rem 0;

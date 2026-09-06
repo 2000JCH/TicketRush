@@ -48,12 +48,24 @@ export function ReservationsPage() {
         {reservations?.map((r) => (
           <li key={r.reservationId} className="reservation-item">
             <div>
-              <strong>예약 번호 {r.reservationId}</strong>
+              <strong>{r.eventName}</strong>
               <span className="muted"> — {STATUS_LABEL[r.status]}</span>
             </div>
             <div className="muted">
-              {r.quantity}매 · {r.amount.toLocaleString()}원 · 요청 시각{" "}
-              {new Date(r.requestedAt).toLocaleString()}
+              예약 번호 {r.reservationId} · {r.quantity}매 · {r.amount.toLocaleString()}원
+            </div>
+            {r.seats.length > 0 && (
+              <div className="reservation-seats">
+                {r.seats.map((s) => (
+                  <span key={`${s.sectionName}-${s.rowNo}-${s.seatNo}`} className="seat-tag">
+                    {s.sectionName} {s.rowNo}열 {s.seatNo}번
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="muted">
+              예약 시각 {new Date(r.requestedAt).toLocaleString()}
+              {r.confirmedAt && ` · 결제 완료 ${new Date(r.confirmedAt).toLocaleString()}`}
             </div>
             {r.status === "PAYMENT_CONFIRMED" && (
               <button
