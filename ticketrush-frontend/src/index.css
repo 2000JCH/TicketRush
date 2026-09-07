@@ -157,6 +157,32 @@ main {
   font-weight: 400;
 }
 
+/* --- 주최자 공연 등록 폼 --- */
+.organizer-form {
+  max-width: 560px;
+}
+
+.organizer-form select {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 1rem;
+  background: var(--card);
+}
+
+.organizer-section {
+  gap: 0.7rem;
+}
+
+.organizer-row {
+  display: flex;
+  gap: 0.8rem;
+}
+
+.organizer-row label {
+  flex: 1;
+}
+
 .radio {
   flex-direction: row !important;
   align-items: center;

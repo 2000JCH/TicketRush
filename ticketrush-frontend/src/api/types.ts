@@ -47,6 +47,22 @@ export interface EventDetail {
   sections: EventSection[];
 }
 
+/** 주최자 공연 등록 폼 → POST /api/v1/events (EventRequest/SectionRequest와 1:1). */
+export interface SectionInput {
+  name: string;
+  type: SectionType;
+  price: number;
+  rowCount?: number;
+  seatsPerRow?: number;
+  totalQuantity?: number;
+}
+
+export interface EventCreateRequest {
+  name: string;
+  openAt: string; // "YYYY-MM-DDTHH:MM:SS"
+  sections: SectionInput[];
+}
+
 export interface QueueStatusResponse {
   rank: number;
   entryToken: string | null;

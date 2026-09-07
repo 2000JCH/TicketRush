@@ -26,6 +26,8 @@ export function Layout() {
                     <Link to="/admin/members">회원 관리</Link>
                     <Link to="/admin/events">콘서트 현황</Link>
                   </>
+                ) : role === "ORGANIZER" ? (
+                  <Link to="/organizer/events/new">공연 등록</Link>
                 ) : (
                   <Link to="/reservations">내 예약</Link>
                 )}

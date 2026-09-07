@@ -12,6 +12,7 @@ import { AccountPage } from "./pages/AccountPage";
 import { AdminApprovalsPage } from "./pages/AdminApprovalsPage";
 import { AdminMembersPage } from "./pages/AdminMembersPage";
 import { AdminEventStatsPage } from "./pages/AdminEventStatsPage";
+import { OrganizerEventCreatePage } from "./pages/OrganizerEventCreatePage";
 
 function App() {
   return (
@@ -51,6 +52,14 @@ function App() {
           element={
             <ProtectedRoute>
               <AccountPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/organizer/events/new"
+          element={
+            <ProtectedRoute organizerOnly>
+              <OrganizerEventCreatePage />
             </ProtectedRoute>
           }
         />
