@@ -1,11 +1,14 @@
 import { useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { formatApiError } from "../api/errorMessage";
 
 export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // 예매하러 가다 로그인으로 튕긴 경우, 로그인 후 원래 보던 공연으로 되돌려 보낸다.
+  const redirectTo = (location.state as { from?: string } | null)?.from ?? "/";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -17,7 +20,7 @@ export function LoginPage() {
     setSubmitting(true);
     try {
       await login(email, password);
-      navigate("/");
+      navigate(redirectTo, { replace: true });
     } catch (err) {
       setError(formatApiError(err));
     } finally {

@@ -2,10 +2,17 @@ import type { ReactNode } from "react";
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
-export function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { isReady, isLoggedIn } = useAuth();
+export function ProtectedRoute({
+  children,
+  adminOnly = false,
+}: {
+  children: ReactNode;
+  adminOnly?: boolean;
+}) {
+  const { isReady, isLoggedIn, role } = useAuth();
 
   if (!isReady) return <div className="page">로딩 중...</div>;
   if (!isLoggedIn) return <Navigate to="/login" replace />;
+  if (adminOnly && role !== "ADMIN") return <Navigate to="/" replace />;
   return <>{children}</>;
 }

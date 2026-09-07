@@ -1,7 +1,7 @@
 // api-design.md 스키마와 1:1로 맞춘 타입. 백엔드 응답 필드명을 그대로 따른다.
 
 export type Role = "BUYER" | "ORGANIZER" | "ADMIN";
-export type AccountStatus = "PENDING" | "ACTIVE";
+export type AccountStatus = "PENDING" | "ACTIVE" | "SUSPENDED";
 
 export interface SignupResponse {
   accountId: number;
@@ -129,14 +129,44 @@ export interface ReservationDetail {
   confirmedAt: string | null;
 }
 
-export type AccountRole = "BUYER" | "ORGANIZER" | "ADMIN";
+/** @deprecated Role을 쓰세요. A그룹에서 임시로 만든 별칭. */
+export type AccountRole = Role;
 
 export interface AccountInfo {
   accountId: number;
   email: string;
-  role: AccountRole;
-  status: "PENDING" | "ACTIVE";
+  role: Role;
+  status: AccountStatus;
   createdAt: string;
+}
+
+/** 관리자 회원 목록 응답의 한 건 (백엔드 AccountResponse). */
+export interface AdminAccount {
+  accountId: number;
+  email: string;
+  role: Role;
+  status: AccountStatus;
+  createdAt: string;
+}
+
+export interface PagedResponse<T> {
+  content: T[];
+  page: number;
+  size: number;
+  totalElements: number;
+  totalPages: number;
+}
+
+/** 관리자 콘서트 현황 한 줄. */
+export interface AdminEventStats {
+  eventId: number;
+  eventName: string;
+  openAt: string;
+  capacity: number;
+  sold: number;
+  remaining: number;
+  confirmedReservations: number;
+  confirmedAmount: number;
 }
 
 export interface ApiErrorBody {

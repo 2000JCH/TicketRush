@@ -70,8 +70,16 @@ export function QueuePage() {
       {rank === null && !error && <p>대기열에 진입하는 중...</p>}
       {rank !== null && (
         <div className="queue-status">
-          <p className="queue-rank">내 순번: {rank.toLocaleString()}번</p>
-          <p className="muted">차례가 되면 자동으로 좌석 선택 화면으로 이동합니다.</p>
+          <span className="badge badge-soon">대기 중</span>
+          <p className="queue-label">내 대기 순번</p>
+          <p className="queue-rank">
+            <strong>{rank.toLocaleString()}</strong>번째
+          </p>
+          <p className="muted">
+            차례가 되면 자동으로 좌석 선택 화면으로 이동합니다.
+            <br />
+            새로 고침하면 순번이 뒤로 밀리니 주의해주세요.
+          </p>
         </div>
       )}
     </div>

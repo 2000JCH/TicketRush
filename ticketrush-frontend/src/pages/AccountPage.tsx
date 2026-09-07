@@ -2,17 +2,18 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { getMyAccount } from "../api/account";
 import { formatApiError } from "../api/errorMessage";
-import type { AccountInfo, AccountRole } from "../api/types";
+import type { AccountInfo, AccountStatus, Role } from "../api/types";
 
-const ROLE_LABEL: Record<AccountRole, string> = {
+const ROLE_LABEL: Record<Role, string> = {
   BUYER: "일반 회원",
   ORGANIZER: "주최자",
   ADMIN: "관리자",
 };
 
-const STATUS_LABEL: Record<AccountInfo["status"], string> = {
+const STATUS_LABEL: Record<AccountStatus, string> = {
   ACTIVE: "정상",
   PENDING: "승인 대기",
+  SUSPENDED: "정지됨",
 };
 
 export function AccountPage() {
