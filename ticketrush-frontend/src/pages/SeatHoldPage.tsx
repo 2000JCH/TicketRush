@@ -8,6 +8,7 @@ import { VirtualizedSeatGrid } from "../components/VirtualizedSeatGrid";
 import { ApiError } from "../api/client";
 import { formatApiError } from "../api/errorMessage";
 import { clearEntryToken, getEntryToken } from "../lib/entryTokenStore";
+import { randomId } from "../lib/randomId";
 import * as PortOne from "@portone/browser-sdk/v2";
 import type {
   EventDetail,
@@ -248,7 +249,7 @@ export function SeatHoldPage() {
     setError(null);
     setBusy(true);
     try {
-      const idempotencyKey = crypto.randomUUID();
+      const idempotencyKey = randomId();
       const response =
         section.type === "SEATED"
           ? await requestPayment(
