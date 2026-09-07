@@ -335,18 +335,28 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **주최자 공연 등록 폼 추가(Option A, 프론트만)**: 사용자가 "간단하게라도 브라우저에서 주최자가 공연 등록"을 요청. **이벤트 승인 단계는 마감 때문에 안 만듦**(계정 승인만) — 승인된 주최자가 등록하면 바로 목록 노출. 신규 `OrganizerEventCreatePage`(`/organizer/events/new`, 공연명·오픈일시·구역 동적 추가[지정석 행·열 / 스탠딩 수량]), `ProtectedRoute`에 `organizerOnly` 프롭, 헤더에 `role === "ORGANIZER"`면 "공연 등록" 링크, `api/events.ts`에 `createEvent`. 기존 API `POST /api/v1/events` 그대로 호출 — 폼으로 만든 공연도 시드된 공연과 동일(좌석 생성·대기열·홀드·결제 전부). **C그룹 일부만 이번에 포함**(생성 UI만, 시간·좌석배치 세밀 입력 UI는 여전히 없음).
   - 검증: `tsc -b`/`oxlint`/`vite build` 통과, 로컬에서 `POST /events` 계약 확인(201). 브라우저 폼 테스트 사용자 확인 완료.
 
-**다음 작업(사용자와 합의한 순서 — 2026-09-07 밤, 내일 아침 제출 목표)**:
-1. ~~AWS 재배포~~ / ~~웹훅 검증~~ / ~~주최자 등록 폼~~ — 완료
-2. **커밋 (fix/feat/deploy/docs 분할, push는 사용자)** → EC2 `git pull` + 프론트 dist 재배포
-3. **AWS에서 전체 시연 녹화** (① 구매자 예매→결제 ② 주최자 가입→승인→공연 등록 ③ 관리자 콘솔) — 캡컷 편집
-4. AWS 리소스 삭제 (EC2/RDS)
-5. **시스템 아키텍처 다이어그램** (mermaid)
-6. **ERD** (mermaid, db-schema.md 기반)
-7. **처리 흐름도** (시퀀스 2~3개: 예매 골든패스 / Saga 보상 / Redis rebuild)
-8. **포트폴리오 PDF** (`all/classq/.claude/정찬혁_ClassQ_포트폴리오.pdf` 형식 참고)
-9. **README.md 갱신**
-10. **발표자료 PPT**
-11. **발표 대본**
+**다음 작업(2026-09-07 밤, 내일 아침 제출 목표)**:
+1. ~~AWS 재배포~~ / ~~웹훅 검증~~ / ~~주최자 등록 폼~~ / ~~커밋+푸시~~ (`231c703`/`2d6dcd2`/`b7979bc`/`1c89edd`) — 완료
+2. ~~AWS에서 전체 시연 녹화 + 캡컷 편집~~ — 완료 (① 구매자 ② 주최자 가입→승인→공연 등록 ③ 관리자 콘솔)
+3. ~~판매 데이터 시드 (관리자 콘서트 현황 데모용)~~ — 완료 (이제 삭제된 EC2에만 있었음)
+4. ~~AWS 리소스 삭제~~ — 완료 (EC2 terminated / RDS deleted, 비용 0)
+5. **다이어그램** — **완료** (2026-09-07 저녁 재작업):
+   - ~~mermaid 3종 초안~~(`diagrams.md`) → **draw.io 네이티브로 전환**. Docker `rlespinasse/drawio-export`로 `.drawio → PNG` 로컬 렌더 파이프라인 확보(`MSYS_NO_PATHCONV=1` 필요, `-o export` 폴더 지정).
+   - `diagrams/01-architecture.drawio` — classq 인프라구조도 스타일(중첩 점선 컨테이너 `AWS > EC2` + `AWS RDS`/`모니터링` 독립 클러스터, 파스텔 색 박스, Outbox CDC 체인 주황 점선). decisions.md 10번(EKS/ElastiCache/MSK 미도입) 반영.
+   - `diagrams/02-erd.drawio` — draw.io 정식 ER 테이블(PK/FK/UK) + 까마귀발. db-schema.md 7테이블 전수 대조(mermaid 초안에서 빠졌던 `section`/`seat`/`reservation`의 `created_at` 보강). **사용자 요청으로 제목·범례·설계노트 박스는 제거**(테이블+관계선만). `임시참조폴더/티켓러쉬ERD.png`로 채택 확인.
+   - `diagrams.md` mermaid ERD도 `created_at` 3개 동기화, 인덱스 언급은 db-schema.md로 위임. 정식본은 `.drawio`.
+   - **처리 흐름도(시퀀스)는 일정상 취소**(2026-09-07, 사용자 결정). `03-1-golden-path.drawio` 삭제, `diagrams.md` 3절 삭제.
+   - PNG는 `diagrams/export/`. README용 ascii명 복사본은 `docs/images/`. **커밋 안 됨.**
+6. **README.md 갱신** — **완료**(2026-09-07). "중간 보고서"(8/28) 폐기 → 포트폴리오용 최종본.
+   - 섹션: 개요 / 핵심 기능(표) / 아키텍처(이미지) / ERD(이미지) / 기술 스택 / 기술적 의사결정·트러블슈팅 5건(분산락·rebuild·Kafka Boot4·한계테스트 예측미스·JDBC batch) / 테스트 결과 / 실행 방법 / 프로젝트 구조.
+   - **기술 스택은 5개 카테고리 표**(Backend / Data&Messaging / Infra&Deploy / Frontend / Test&Observability) — `build.gradle`·`package.json`·`docker-compose.yml`·`application.properties` 전수 대조로 MySQL·Docker·AWS EC2/RDS·Prometheus/Grafana·JPA·Actuator·React Router·PortOne SDK·JUnit 등 빠졌던 것 전부 추가.
+   - **이미지 4장** `docs/images/`(ascii명): `architecture.png`·`erd.png`(draw.io 렌더) + `grafana-load-test.png`·`grafana-chaos-kafka.png`(둘 다 `aws-remeasure/` 4패널 = HikariCP 포함). A-1은 표만, 사진 없음.
+   - `.env` 필수/선택 분리, 실제 기본값 반영. 시연영상·포트폴리오 PDF 링크는 자리표시자(사용자 결정 대기).
+   - **커밋 안 됨.**
+7. **포트폴리오 PDF** — HTML→브라우저 PDF 저장. 목차: ①개요 ②핵심문제 ③아키텍처 ④데이터모델 ⑤문제와해결(분산락·rebuild·Kafka Boot4·한계테스트 병목진단·웹훅검증) ⑥테스트결과 ⑦회고/한계 (⚠️ 아직 착수 안 함)
+8. **발표자료 PPT** (10~15슬라이드, PDF 소재 압축)
+9. **발표 대본** (PPT 순서대로)
+10. **커밋** — `docs: 다이어그램 + README` 등. push는 사용자
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 

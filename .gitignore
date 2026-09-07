@@ -50,3 +50,6 @@ out/
 
 ### Chaos test fault-injection timeline (scripts/chaos-*.ps1 output) ###
 scripts/chaos-timeline.log
+
+### 다이어그램 렌더 출력 (drawio-export, docs/images/에 필요분 복사됨) ###
+.claude/docs/diagrams/export/

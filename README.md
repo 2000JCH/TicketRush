@@ -1,157 +1,306 @@
-# TicketRush 중간 보고서
+# 🎫 TicketRush
+
+> 스탠딩·지정석이 혼합된 콘서트 좌석 예매 시스템.
+> 오픈 순간의 트래픽 폭주와 Redis·Kafka 장애 상황에서도 **오버셀(초과 판매) 0**을 보장하고,
+> 그것을 부하 테스트·카오스 테스트로 **직접 측정해 증명**하는 것을 목표로 한 프로젝트입니다.
+
+![Java](https://img.shields.io/badge/Java-21-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1-6DB33F)
+![MySQL](https://img.shields.io/badge/MySQL-8-4479A1)
+![Redis](https://img.shields.io/badge/Redis-7.2-DC382D)
+![Kafka](https://img.shields.io/badge/Kafka-KRaft%20%2B%20Debezium-231F20)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
+![AWS](https://img.shields.io/badge/AWS-EC2%20%2B%20RDS-FF9900)
+![React](https://img.shields.io/badge/React-19%20%2B%20Vite%20%2B%20TS-61DAFB)
+
+**기간** 2026.08 ~ 2026.09 (30일) · **인원** 1인 · **저장소** https://github.com/2000JCH/TicketRush
+
+🔗 시연 영상: *(링크 추가 예정)* · 📄 포트폴리오: *(링크 추가 예정)*
 
 ---
 
-## 1. 프로젝트 소개 및 해결하려는 문제
+## 목차
 
-**TicketRush**는 스탠딩/지정석이 혼합된 콘서트 좌석 예매 시스템입니다. 실제 티켓팅 사이트처럼 특정 오픈 시각에 트래픽이 폭주하는 "선착순 오픈(Rush)" 상황을 전제로 하며, 이 프로젝트가 풀려는 핵심 문제는 다음과 같습니다.
-
-- 동시에 수천 명이 같은 좌석/수량을 두고 경쟁할 때 **오버셀(초과 판매)이 발생하지 않도록** 보장하는 것
-- 좌석 선택 → 홀드 → 결제 → 확정까지 이어지는 흐름에서, 일부 단계가 실패하거나 타임아웃되어도(결제 실패, TTL 만료 등) **좌석 상태가 항상 정확히 되돌아가는 것**
-- Redis/Kafka 같은 인프라가 실제로 장애를 일으켜도(카오스 테스트) 정합성이 깨지지 않는 것
-
-즉 "빠른가"뿐 아니라 "폭주·장애 상황에서도 버틸 수 있는가"를 직접 만들고 실측으로 증명하는 것이 목표입니다.
-
-- 기간: 2026-08-10 ~ 2026-09-09 (30일, 1인 개발)
-
----
-
-## 2. 현재까지 구현·진행한 내용
-
-### 1주차 (완료)
-
-- **회원가입/로그인**: 이메일·비밀번호로 가입하고 로그인하면 접속을 유지할 수 있는 토큰을 발급받습니다. 로그인 상태를 오래 유지하기 위한 재발급 토큰도 안전하게(httpOnly Cookie + Redis 저장, 재발급마다 값 교체) 구현했습니다
-- **주최자(ORGANIZER) 가입 승인제**: 아무나 바로 공연을 등록하지 못하도록, 주최자로 가입하면 관리자(ADMIN)가 승인해야만 로그인할 수 있게 했습니다
-- **공연(이벤트) 등록/관리**: 주최자가 공연 정보와 구역·좌석을 등록·수정(전체 교체)·삭제·조회할 수 있습니다. 좌석이 최대 7만 석까지 나올 수 있어 대량 생성도 빠르게 처리되도록 만들었습니다(`JdbcTemplate` batch)
-- **대기열(줄서기)**: 예매 오픈 시 한꺼번에 몰리는 사용자를 도착 순서대로 세워두고, 자기 순번을 폴링으로 확인하다가 차례가 되면 자동으로 입장 토큰을 받습니다(Redis Sorted Set 기반 대기열 + 주기적으로 앞순번을 통과시키는 스케줄러)
-- **결제 연동 사전 점검**: 실제 결제대행사(포트원)와 연결이 되는지 미리 확인했고, 결제수단은 카드(토스페이먼츠)·카카오페이 2가지로 정했습니다
-
-### 2주차 (완료)
-
-- **좌석 선택(홀드)**: 좌석을 고르면 남이 동시에 못 고르도록 잠그는 기능입니다. 여러 명이 같은 좌석을 동시에 눌러도 Redis 명령의 원자성 덕분에 딱 한 명만 성공합니다
-- **자동 좌석 반납**: 좌석만 잡아두고 결제를 안 하면 일정 시간 뒤 자동으로 풀려서 다른 사람이 다시 고를 수 있게 됩니다(설계 문서의 원안이던 Redis Keyspace Notification 대신, 만료 시각순 목록 + 주기적 스케줄러 방식으로 구현 단계에서 재설계 — 상세 내용은 5번 참고)
-- **예약→결제 상태 흐름(Saga)**: 좌석 찜 → 결제 요청 → 결제 성공 시 확정, 실패 시 좌석을 자동으로 되돌리는 상태 흐름을 만들었습니다. 아직 실제 PG 호출은 붙이지 않았고 상태 전이 로직만 이 프로젝트 첫 자동 테스트(JUnit 8건)로 검증한 단계이며, 실제 결제 연동은 3주차에 이어붙일 예정입니다
-- **2좌석 동시 선택(그룹 홀드) 성능 비교 준비**: 좌석 2개를 한 번에 묶어서 잡는 기능에 서로 다른 두 가지 잠금 방식(Redisson 분산락 / DB 비관적 락)을 각각 구현해뒀습니다. 동시성 테스트(8개 요청 동시 시도)로 둘 다 초과 판매 없이 안전하게 동작하는 것까지는 확인했고, **둘 중 어느 방식을 최종 채택할지는 아직 정하지 않아** 3주차 부하테스트에서 실측 비교 후 정합니다
+1. [개요](#1-개요)
+2. [핵심 기능](#2-핵심-기능)
+3. [시스템 아키텍처](#3-시스템-아키텍처)
+4. [ERD](#4-erd)
+5. [기술 스택](#5-기술-스택)
+6. [기술적 의사결정 & 트러블슈팅](#6-기술적-의사결정--트러블슈팅)
+7. [테스트 결과](#7-테스트-결과)
+8. [실행 방법](#8-실행-방법)
+9. [프로젝트 구조](#9-프로젝트-구조)
 
 ---
 
-## 3. 현재 결과물
+## 1. 개요
 
-데모용 프론트엔드(React/Vite)로 실제 화면을 캡처했고, 화면이 없는 부분(자동 테스트/DB 실측)은 터미널 캡처로 대체합니다.
+실제 티켓팅 사이트처럼 특정 오픈 시각에 트래픽이 몰리는 **"선착순 오픈(Rush)"** 상황을 전제로 합니다.
+이 프로젝트가 풀려는 문제는 다음 3가지입니다.
 
-### 대기열 진입 → 순번 폴링 → 입장 토큰 발급
+- 동시에 수천 명이 같은 좌석·수량을 두고 경쟁할 때 **오버셀이 발생하지 않도록** 보장
+- 좌석 선택 → 홀드 → 결제 → 확정 흐름에서 일부 단계가 실패·타임아웃돼도 **좌석 상태가 항상 정확히 복원**
+- Redis·Kafka가 실제로 장애를 일으켜도(카오스 테스트) **정합성이 깨지지 않는 것**
 
-![이벤트 상세 화면](.claude/screenshots/콘서트.png)
-![대기열 순번 화면](.claude/screenshots/대기열.png)
-![대기열 통과 후 좌석 선택 화면으로 자동 이동](.claude/screenshots/홀드하기.png)
-
-### 좌석 조회 → 홀드
-
-![좌석 조회/선택 화면](.claude/screenshots/홀드하기.png)
-![홀드 완료 화면](.claude/screenshots/홀드완료.png)
-
-홀드 해제 및 TTL 만료 후 자동 반납은 2주차에 Node 스크립트 기반 자동 테스트로 이미 검증했습니다(`progress.md` 2026-08-19 기록) — 명시적 해제 시 스케줄까지 함께 지워지는지, TTL 경과 후 자동으로 `AVAILABLE`로 돌아오는지 모두 확인했습니다.
-
-### 그룹 좌석 홀드 동시성 테스트 (오버셀 0건)
-
-```
-$ gradlew.bat test --tests "*GroupHold*"
-
-SeatServiceGroupHoldTest (Redisson RLock)     — 5개 테스트, 0 실패 (1.924초)
-  ✓ groupHold_bothSeatsSucceed()                      ← 좌석 2개를 그룹으로 한 번에 요청하면 둘 다 정상적으로 잡히는지
-  ✓ groupHold_duplicateSeatIds_rejected()              ← 같은 좌석을 두 번 중복으로 요청하면 거절되는지
-  ✓ groupHold_moreThanTwoSeats_rejected()              ← 좌석 3개 이상 요청하면 거절되는지 (최대 2개 정책)
-  ✓ groupHold_oneSeatAlreadyHeld_rollsBackTheOther()   ← 둘 중 하나가 이미 다른 사람 좌석이면 나머지도 자동으로 취소되는지
-  ✓ groupHold_concurrentSamePair_onlyOneSucceeds()     ← 8명이 동시에 같은 좌석 2개를 노려도 딱 1명만 성공하는지 (오버셀 0건 확인)
-
-SeatServiceGroupHoldDbLockTest (DB 비관적 락)  — 3개 테스트, 0 실패 (11.16초)
-  ✓ groupHold_bothSeatsSucceed()                      ← 좌석 2개를 그룹으로 한 번에 요청하면 둘 다 정상적으로 잡히는지
-  ✓ groupHold_oneSeatAlreadyHeld_rollsBackTheOther()   ← 둘 중 하나가 이미 다른 사람 좌석이면 나머지도 자동으로 취소되는지
-  ✓ groupHold_concurrentSamePair_onlyOneSucceeds()     ← 동일 시나리오(8명 동시 경쟁), 오버셀 0건 확인
-
-BUILD SUCCESSFUL
-```
-
-### 이벤트 등록 시 좌석 대량 생성 실측
-
-50,000석(100행 × 500석) 규모 이벤트를 새로 등록해 재현 측정했습니다.
-
-```
-Com_insert (등록 전): 83
-Com_insert (등록 후): 135
-→ INSERT 문 52개로 50,000개 좌석 생성 (이벤트 1 + 구역 1 + 좌석 50배치)
-소요 시간: 1,361ms (약 1.4초)
-```
-
-2주차에 처음 측정했던 값(INSERT 문 53개, 1,673ms)과 거의 동일한 결과로, 재현성까지 확인했습니다.
+즉 "빠른가"보다 **"폭주·장애 상황에서 버티는가"를 직접 만들고 실측으로 증명**하는 데 초점을 뒀습니다.
+설계 문서 작성 → 구현 → 부하/카오스 테스트 → AWS 배포·재측정까지 전 과정을 1인으로 진행했으며,
+모든 아키텍처 결정은 `.claude/docs/decisions.md`에 근거와 함께 기록했습니다.
 
 ---
 
-## 4. 사용 기술 및 주요 기술 선택 이유
+## 2. 핵심 기능
 
-| 기술 | 선택 이유 |
+| 도메인 | 기능 |
 |---|---|
-| Spring Boot 4.1.0 / Java 21 | 최신 스택 학습 목적 + Jackson 3 전환 등 실전 이슈를 직접 부딪혀보기 위함입니다 |
-| JWT (Access 단기만료 + Refresh) | 서버를 여러 대로 늘려도(스케일아웃) 세션을 서버끼리 공유할 필요가 없도록(무상태) 하기 위함입니다. Refresh Token은 httpOnly Cookie로 전달해 XSS 위험을 줄이고, Redis에 저장해 로그아웃/탈취 시 즉시 무효화할 수 있게 했습니다 |
-| Redis (원자 연산 기반 좌석 제어) | Redis는 싱글 스레드라 `HSETNX`(좌석 하나 잡기)·`HINCRBY`(스탠딩 재고 증감) 같은 단일 명령 자체가 이미 원자적입니다. 그래서 좌석 하나·스탠딩 재고는 별도 락 없이도 오버셀을 막을 수 있고, 락은 여러 좌석을 한 번에 묶는(그룹 홀드) 경우에만 필요해 적용 범위를 최소화했습니다 |
-| Redisson RLock vs DB 비관적 락 | 그룹 홀드 하나만을 위해 분산락 기술을 미리 하나로 정하기보다, 두 방식을 실제로 구현해 처리량·지연·에러율을 직접 비교(3주차)하고 근거를 갖고 채택하기 위함입니다 |
-| Gatling (부하테스트, 3주차 예정) | nGrinder처럼 별도 Controller/Agent 서버를 띄울 필요 없이, 로컬에서 시나리오 코드만 작성하면 바로 실행하고 HTML 리포트까지 받아볼 수 있어 1인 프로젝트에 설치·운영 부담이 적습니다 |
-| Pumba (카오스/장애 주입 테스트, 3주차 예정) | Docker 컨테이너를 직접 대상으로 하는 도구라 지금 쓰는 docker-compose(MySQL/Redis/Kafka)에 코드 수정 없이 그대로 적용할 수 있습니다. 컨테이너 강제 종료뿐 아니라 네트워크 지연·패킷 유실 같은 시나리오도 다룰 수 있어, 단순 `docker stop`보다 표현력이 넓고 Toxiproxy처럼 애플리케이션 연결 설정을 바꿀 필요도 없습니다 |
-| Kafka (KRaft) + Outbox 패턴 (3주차 구현 예정) | DB 트랜잭션과 메시지 발행을 하나로 묶을 수 없는 문제를 `outbox_events` 테이블 + Debezium CDC로 풀 계획입니다. Kafka는 결제 확정 "이후"의 후속 작업(정산/알림)을 사용자 응답과 분리하는 역할만 맡고, 좌석 동시성 제어 자체는 그대로 Redis가 담당합니다 |
-| Choreography 기반 Saga (3주차 구현 예정) | Kafka Consumer 기반 이벤트 구조로 설계했기 때문에, 별도 조율 컴포넌트(오케스트레이터) 없이도 자연스럽게 확장할 수 있을 것으로 판단했습니다 |
-| 포트원(PortOne) V2 (3주차 연동 예정) | 토스페이먼츠(카드)·카카오페이(간편결제) 2개 채널을 각각 직접 연동하지 않고 포트원을 경유합니다. V2는 PG사와 무관하게 웹훅 페이로드·서명 검증 방식을 통일해줘서, 결제 채널이 여러 개여도 웹훅 수신·검증·결제 확정 로직을 PG사별로 나눌 필요가 없습니다 |
-| AWS RDS(MySQL) (3주차 배포 예정) | 로컬 개발은 Docker MySQL로 진행 중이고, AWS 배포 시 관리형 서비스인 RDS로 올릴 예정입니다 |
-| Nginx (3주차 구현 예정) | 대기열 진입 API 앞단에서 요청 폭주를 1차로 걸러내는 Rate Limiter 역할만 맡깁니다. "먼저 온 사람이 먼저 산다"는 순서 보장은 Redis 대기열이 담당합니다 |
+| **대기열** | Redis Sorted Set 기반 선착순 대기열. 순번을 폴링으로 확인하다 차례가 되면 스케줄러가 입장 토큰(TTL) 발급 |
+| **좌석 홀드** | 자원 유형별 3분기 — ① 지정석 단일: `HSETNX` 원자 연산(락 없음) ② 지정석 그룹(≤2매): Redisson 분산락으로 전부 성공 또는 전부 롤백 ③ 스탠딩: `HINCRBY` 수량 차감 |
+| **홀드 만료** | 만료 시각 정렬 집합(`hold_schedule`) + 주기 스케줄러로 자동 반납 (Redis Keyspace Notification 원안에서 재설계 — [6번](#6-기술적-의사결정--트러블슈팅) 참고) |
+| **결제 Saga** | Choreography 방식. 결제 실패 시 `outbox_events` → Debezium CDC → Kafka → Consumer가 좌석 자동 반납. 중앙 조율자 없음 |
+| **결제 연동** | 포트원(PortOne) V2 — 토스페이먼츠(카드) / 카카오페이(간편결제). 웹훅 서명 검증(Standard Webhooks), DB 상태 조회로 멱등 보장 |
+| **장애 복구** | Redis 재시작으로 좌석 상태가 유실되면 요청 경로에서 감지 → DB 기준으로 재구성(rebuild), 그 사이 요청은 매진과 구분되는 `503` |
+| **인증** | JWT(Access 단기 + Refresh 회전). Refresh Token은 httpOnly Cookie + Redis 저장으로 즉시 무효화 가능 |
+| **프론트엔드** | 예매 골든 패스 · 내 예약/내 정보 · 관리자 콘솔(주최자 승인·회원 관리·콘서트별 매출 현황) · 주최자 공연 등록 |
 
 ---
 
-## 5. 진행 과정에서 어려웠던 점과 해결한 내용
+## 3. 시스템 아키텍처
 
-**1) 좌석을 대량으로 만들 때 "여러 건을 묶어 한 번에 저장(배치)"이 전혀 안 먹히던 문제**
+![시스템 아키텍처](docs/images/architecture.png)
 
-공연 하나를 등록하면 좌석이 한 번에 수천~수만 개씩 만들어집니다. 이걸 한 건씩 저장하면 느리기 때문에 여러 건을 묶어서 한 번에 저장하는 배치 기능을 켰는데, 실제로는 전혀 빨라지지 않았습니다. 원인을 찾아보니 좌석의 고유번호를 데이터베이스가 자동으로 매기는 방식(`AUTO_INCREMENT`)을 쓰고 있었는데, 이 방식은 한 건을 저장하자마자 방금 매겨진 번호를 바로 받아와야 해서 애초에 여러 건을 묶어 보낼 수가 없었습니다. 그래서 좌석을 저장하는 부분만 JPA를 거치지 않고 SQL 여러 건을 직접 묶어 보내는 방식으로 바꿨고, 실제로 데이터베이스에 전달되는 저장 명령 개수가 확 줄어든 것까지 확인했습니다.
-
-**2) 재발급 토큰이 "새 값으로 바뀐 척"만 하고 실제로는 안 바뀌던 문제**
-
-로그인을 오래 유지해주는 재발급 토큰(Refresh Token)은 쓸 때마다 새 값으로 바꿔서 이전 값은 무효화하도록(회전) 만들었습니다. 그런데 아주 짧은 시간 안에 연달아 재발급하면 새 토큰과 이전 토큰이 완전히 똑같은 값으로 나오는 걸 발견했습니다. 원인은 토큰 안에 들어가는 발급 시각이 "초" 단위까지만 기록돼서, 같은 초 안에 두 번 발급하면 두 토큰의 내용이 우연히 똑같아져 버린 것이었습니다. 겉보기엔 정상 동작하는 것 같았지만 실제로는 "회전"이 전혀 일어나지 않고 있던 셈입니다. 토큰마다 절대 겹치지 않는 고유 값을 하나씩 추가로 넣어서 해결했습니다.
-
-**3) "비어 있으면 아예 없는 것"으로 취급되는 특성이 장애 감지 로직과 충돌한 문제**
-
-좌석 상태는 공연 하나당 하나의 묶음으로 저장해두고, 이 묶음 자체가 통째로 사라지면 "장애로 데이터가 날아갔다"고 판단하도록 만들었습니다. 그런데 좌석 없이 입석(스탠딩)만 있는 공연은 이 묶음에 넣을 값이 하나도 없어서, 저장소 특성상 묶음 자체가 아예 안 만들어지는 경우가 있었습니다. 그러면 앞의 장애 판정 로직이 이걸 보고 "멀쩡한 공연인데 장애가 난 것"으로 잘못 판단해버렸습니다. 값이 하나도 없어도 묶음이 항상 만들어지도록, 표시용 값을 하나씩 항상 같이 넣어두는 방식으로 해결했습니다.
-
-**4) 상한 검사가 "숫자가 너무 커지는 계산" 때문에 오히려 뚫리던 문제**
-
-한 공연에 등록할 수 있는 좌석 수를 7만 석으로 제한하는 검사를 넣었는데, 처음엔 이 계산에 표현할 수 있는 숫자 범위가 좁은 자료형을 썼습니다. 그러다 보니 아주 큰 값끼리 곱하면 그 범위를 넘어서면서 오히려 이상한 값으로 튀어버려, 상한을 넘는 요청이 검사를 그냥 통과해버리는 버그가 있었습니다. 범위가 더 넓은 자료형으로 바꿨지만, 그래도 극단적으로 큰 값을 가진 구역을 여러 개 만들면 그 넓은 범위마저 넘어서는 문제가 남아 있었습니다. 그래서 여러 구역의 값을 다 더하기 전에, 구역 하나의 좌석 수만으로 먼저 상한을 넘는지 검사해서 애초에 큰 값이 계산에 끼어들지 못하게 막는 방식으로 최종 해결했습니다. "더 넓은 자료형을 쓰면 해결된다"가 아니라 "입력 자체의 범위를 좁게 제한해야 안전하다"는 걸 배웠습니다.
-
-**5) 홀드 만료 감지 방식을 설계 문서와 다르게 구현한 문제**
-
-설계 문서에는 원래 Redis의 만료 이벤트 알림(Keyspace Notification)을 구독해서 좌석 홀드 만료를 감지하려 했습니다. 그런데 실제로 짚어보니 위험이 두 가지 있었습니다. 첫째, 이 알림은 구독 중인 서버가 그 순간 재시작 중이면 다시 보내주지 않고 그냥 사라져서, 아무도 안 잡고 있는데 좌석이 계속 "홀드됨" 상태로 남을 수 있었습니다. 둘째, 알림은 만료된 키의 "이름"만 알려주는데 그 시점엔 값이 이미 지워진 뒤라, 스탠딩 좌석 수량을 되돌리는 데 필요한 정보를 읽을 수가 없었습니다. 그래서 만료 시각 순서로 정렬된 목록(`hold_schedule`)에 되돌리는 데 필요한 정보까지 함께 저장해두고, 스케줄러가 주기적으로 만료된 항목을 찾아 되돌리는 방식으로 바꿔서 두 문제를 모두 해결했습니다.
+- **AWS EC2 1대 + Docker Compose**(Nginx · Spring Boot · Redis · Kafka · Kafka Connect/Debezium) **+ RDS(MySQL)**
+- EKS·ElastiCache·MSK·CloudWatch는 **의도적으로 도입하지 않음** — 1인·30일 규모에서는 "관리형 서비스를 써봤다"보다
+  분산락 벤치마크처럼 **근거를 갖고 내린 선택**이 포트폴리오에 더 설득력 있다고 판단했고,
+  이 co-location 구조의 한계(Redis 자원 공유 병목)까지 [테스트로 실측·진단](#7-테스트-결과)했습니다.
+- **좌석 동시성 제어**는 대부분 Redis 원자 연산으로 처리 → DB에는 결제 요청까지 도달한 소수만 닿습니다.
+- **DB 트랜잭션과 이벤트 발행의 원자성**은 애플리케이션이 Kafka로 직접 발행하지 않고 **Outbox 패턴 + Debezium CDC**로 확보합니다.
+- **포트원 웹훅이 결제 확정의 단일 트리거** — SDK 콜백만 믿지 않습니다(창 닫힘·네트워크 끊김 대비).
 
 ---
 
-## 6. 현재 고민 중인 부분 또는 피드백받고 싶은 부분
+## 4. ERD
 
-- **분산락 최종 채택 기준의 적절성**: "정합성(오버셀 0건) 우선 → 처리량 차이 20%p 이상이면 우세한 쪽, 미만이면 운영이 단순한 DB 락 채택"이라는 기준을 세워뒀는데, 이 기준 자체가 실무적으로 합리적인지 피드백 받고 싶습니다.
-- **인프라 도입 범위**: EKS, ElastiCache, MSK, CloudWatch 등을 3주차에 확정할 예정인데, 1인 개발·30일 프로젝트치고는 큰 규모일 수 있습니다. 그럼에도 이런 인프라를 직접 다뤄본 경험이 실제 취업 시장에서 의미가 있는지, 이력서나 면접에서 도움이 될 만한 수준으로 다루려면 어디까지 손대는 게 적절한지 피드백 받고 싶습니다.
-- **성능/처리량 목표치 미정**: Gatling 부하테스트의 성공 기준(동시접속 N명, P99 응답시간 등)을 아직 숫자로 정하지 못했습니다. 이 프로젝트 규모에 맞는 현실적인 목표치 설정 기준에 대해 피드백 받고 싶습니다.
+![ERD](docs/images/erd.png)
 
----
-
-## 7. 향후 구현·개선 계획
-
-**3주차 (08-24 ~ 08-30)**
-
-1. Kafka exactly-once (outbox_events + Debezium CDC 연동)
-2. 결제 연동 — 실제 포트원 웹훅 서명 검증, `ReservationService` Saga와 연결, 예약 취소 API
-3. Nginx 설정 + 인프라(EKS/ElastiCache/MSK/CloudWatch) 검토·확정 및 AWS 배포
-4. 카오스 테스트(Redis/Kafka 장애 주입) + 부하테스트(Gatling) 착수 — **분산락 최종 채택도 이 시점에 확정**
-
-**4주차 (08-31 ~ 09-09)**
-
-- 카오스·부하테스트 마무리, 결과 기반 리팩토링만 진행(새 기능/인프라 변경 없음 원칙)
+- 테이블 7개. 상세 스키마·인덱스 근거는 [`.claude/docs/db-schema.md`](.claude/docs/db-schema.md)
+- `SEAT_HELD`는 **DB에 저장하지 않습니다** — 홀드는 TTL 5~10분짜리 Redis 전용 임시 상태이고,
+  `reservation` 행 자체가 결제 요청(`PAYMENT_REQUESTED`) 시점부터 생성됩니다.
+- 스탠딩 예약은 `reservation_seat` 행이 없습니다(`quantity`만으로 수량 표현).
+- `outbox_events`는 다른 테이블과 FK로 연결되지 않습니다 — Debezium이 binlog로만 읽고 `aggregate_id`로 논리 참조만 합니다.
 
 ---
 
-## 8. GitHub Repository 링크
+## 5. 기술 스택
 
-https://github.com/2000JCH/TicketRush
+### Backend
+
+| 기술 | 역할 / 선택 이유 |
+|---|---|
+| **Java 21 · Spring Boot 4.1 · Gradle** | 최신 스택 학습 목적. Jackson 3 전환(`tools.jackson.*`), Kafka auto-config 분리 등 메이저 버전 전환 이슈를 직접 겪음 |
+| **Spring Data JPA / Hibernate** | 엔티티에서 테이블 자동 생성(`ddl-auto=update`). Flyway는 도입하지 않고 생성 컬럼·CHECK 제약은 애플리케이션 레벨 검증으로 대체 |
+| **Spring Security + JJWT** | JWT 인증(Access 단기 + Refresh 회전). 스케일아웃 시 세션 공유 불필요. Refresh Token은 httpOnly Cookie(XSS 완화) + Redis 저장(즉시 무효화). JSON 처리기는 Jackson 3 호환 문제로 `jjwt-gson` |
+| **Spring Data Redis + Redisson 4.7** | Redis 접근 + 그룹 홀드용 분산락(RLock). Redisson은 core만 추가하고 `RedissonClient` 직접 구성(Jackson 2/3 충돌 회피) |
+| **Spring for Apache Kafka** | `@KafkaListener`로 `PAYMENT_FAILED` 이벤트 소비 → 좌석 반납. Boot 4는 `spring-boot-starter-kafka` 필수([6번 ③](#6-기술적-의사결정--트러블슈팅)) |
+| **Spring Boot Actuator + Micrometer** | `/actuator/prometheus` 하나로 API 응답시간·HikariCP 커넥션 풀·Kafka Consumer lag를 자동 노출(별도 exporter 불필요) |
+
+### Data & Messaging
+
+| 기술 | 역할 / 선택 이유 |
+|---|---|
+| **MySQL 8** | 정합성의 원천(`reservation`·`reservation_seat`·`outbox_events`). 결제 확정은 반드시 여기 동기 기록. 좌석 대량 생성만 `JdbcTemplate` batch |
+| **Redis 7.2** | 대기열(Sorted Set)·좌석 상태(Hash)·홀드 TTL·멱등키(`SETNX`). 싱글 스레드 원자성으로 좌석 1개·스탠딩 재고는 **락 없이** 오버셀 차단. AOF/RDB 비활성(`HELD`는 휘발돼도 되는 임시 상태) |
+| **Apache Kafka (KRaft)** | 결제 확정 "이후" 후속 작업을 사용자 응답과 분리. 좌석 동시성 제어 자체는 Kafka가 아니라 Redis가 담당 |
+| **Debezium (Kafka Connect)** | MySQL binlog CDC → `outbox_events` 변경을 Kafka 토픽으로 발행. 애플리케이션이 Kafka로 직접 publish하지 않음(Outbox 패턴) |
+
+### Infra & Deploy
+
+| 기술 | 역할 / 선택 이유 |
+|---|---|
+| **Docker / Docker Compose** | 로컬 개발 인프라 + AWS 배포 단위. 앱도 `Dockerfile`로 컨테이너화(리허설·배포는 컨테이너, 평소 개발은 `bootRun`) |
+| **AWS EC2 (`m6i.xlarge`, Amazon Linux 2023)** | 앱 + Redis + Kafka + Kafka Connect + Nginx를 단일 인스턴스에 co-location. EKS·ElastiCache·MSK는 [의도적으로 미도입](#3-시스템-아키텍처) |
+| **AWS RDS (MySQL 8, `db.m6i.large`)** | 관리형 DB. binlog 파라미터 그룹(`binlog_format=ROW`)으로 Debezium 연동 |
+| **Nginx** | 대기열 진입 API Rate Limiter(5r/s) + 프론트 정적 파일 서빙 + `/api` 리버스 프록시. 순서 보장은 Redis 대기열이 담당 |
+
+### Frontend
+
+| 기술 | 역할 / 선택 이유 |
+|---|---|
+| **React 19 · Vite · TypeScript** | 데모 프론트엔드. Access Token은 메모리에만, 새로고침 시 `/auth/refresh`로 세션 조용히 복구, 만료 시 자동 재발급 후 원요청 1회 재시도 |
+| **React Router 7** | SPA 라우팅. `ProtectedRoute`의 `adminOnly`/`organizerOnly` 프롭으로 역할별 화면 분리 |
+| **@portone/browser-sdk** | 포트원 V2 결제창 호출(`PortOne.requestPayment()`). 카드=토스페이먼츠 / 카카오페이=간편결제 |
+
+### Test & Observability
+
+| 기술 | 역할 / 선택 이유 |
+|---|---|
+| **Gatling** | 부하 테스트 + 카오스 중 부하 발생을 하나의 시나리오(`GoldenPathSimulation`)로 통일. 별도 Controller/Agent 서버 없이 시나리오 코드만으로 실행 |
+| **Prometheus + Grafana** | 부하/카오스 테스트 관찰(로컬·측정 세션 한정). 4패널 대시보드: 응답시간 P50/95/99 · 상태코드별 요청/에러율 · Kafka lag · HikariCP |
+| **JUnit 5** | Saga 상태 전이(확정/실패), 그룹 홀드 동시성(오버셀 0) 등 |
+| **포트원(PortOne) V2** | 결제 연동. V2는 PG사와 무관하게 웹훅 페이로드·서명 검증(Standard Webhooks)을 통일 — 채널이 여러 개여도 웹훅 로직을 나눌 필요 없음 |
+
+---
+
+## 6. 기술적 의사결정 & 트러블슈팅
+
+> 각 결정의 근거·대안 비교는 [`.claude/docs/decisions.md`](.claude/docs/decisions.md),
+> 측정 수치·재현 과정은 [`.claude/docs/test-results.md`](.claude/docs/test-results.md)에 있습니다.
+
+### ① 분산락: Redisson RLock vs DB 비관적 락 — 직접 구현해 실측 비교
+
+두 방식을 `GroupHoldLockStrategy` 인터페이스로 추상화해 모두 구현하고, 300명 완전 동시 / 좌석 4개로 벤치마크했습니다.
+**처리량·P99는 사실상 동등**(우리 홀드 액션이 `HSETNX` 한 번으로 매우 짧아 락 점유 시간이 무의미). 유일한 실질 차이는
+DB 락이 `REQUIRES_NEW` 트랜잭션마다 HikariCP 커넥션을 물어 **pending이 147까지** 쌓인 것(Redisson은 0).
+→ **Redisson 채택.** "지금 느려서"가 아니라 **확장 시 먼저 무너지는 실패 모드(커넥션 고갈 → HikariCP 타임아웃 절벽)가 있어서**입니다.
+
+### ② Redis 장애 복구 로직 — 설계엔 있고 코드엔 없던 것을 카오스 테스트가 잡아냄
+
+2주차 설계 문서에 "Redis 재시작 시 DB 기준으로 좌석 점유 상태를 재구성한다"고 상세히 적어뒀는데,
+3주차 카오스 테스트를 준비하며 확인해보니 **그 로직이 코드 어디에도 없었습니다.**
+직접 재현: 좌석을 `PAYMENT_REQUESTED` 상태로 만든 뒤 Redis 키를 지우자 그 좌석이 `AVAILABLE`로 보였습니다(재판매 가능 상태).
+→ `SeatStatusRebuildService` 구현. 요청 경로에서 유실을 감지 → 짧은 TTL 락으로 중복 재구성 방지 →
+락을 못 잡은 요청은 매진과 구분되는 `503`으로 즉시 실패(부분 상태를 아무도 안 읽도록).
+
+### ③ Kafka 파이프라인이 "정상으로 보이는 채로" 아무 일도 안 하고 있던 문제
+
+Outbox → Debezium → Kafka → `@KafkaListener` 배관을 다 잇고 결제 실패 이벤트를 흘렸는데 DB 상태가 끝까지 안 바뀌었습니다.
+앱은 8초 만에 에러 없이 기동했지만 Kafka 관련 로그가 **한 줄도 없었고**, 소비자 그룹 자체가 존재하지 않았습니다.
+원인: **Spring Boot 4부터 `KafkaAutoConfiguration`이 `spring-boot-autoconfigure`에서 빠져 별도 스타터로 분리**됨.
+`spring-kafka`만 추가하면 에러 없이 `@KafkaListener`가 조용히 미등록되는 실패였습니다.
+jar 안의 `AutoConfiguration.imports`를 직접 열어 원인을 1차 자료로 확인 후 `spring-boot-starter-kafka`로 교체.
+
+### ④ 한계 테스트: "vCPU를 2배로 늘리면 한계도 오를 것"이라는 예측이 틀린 사례
+
+AWS 배포 전, EC2/RDS 스펙만큼 리소스를 제한한 로컬 리허설 스택으로 한계 테스트를 먼저 돌렸습니다.
+로컬(2 vCPU)에서는 **HikariCP 커넥션 풀**이 1순위 병목이었고 — `GET /seats`가 등록 후 안 바뀌는 좌석 배치도를
+매번 DB에서 다시 읽고 있어 좌석 배치도 Redis 캐싱(`SeatCatalogRepository`)으로 P95를 32~46% 개선했습니다.
+그런데 **AWS(4 vCPU)에서는 250~300명대에서 이미 절벽**이 나타났고, 원인은 HikariCP가 아니라
+**Redis 명령 타임아웃**이었습니다 — Redis를 app·Kafka와 같은 EC2 한 대에서 CPU를 나눠 쓰는 구조([ElastiCache 미도입](#3-시스템-아키텍처)의 결과)에서
+부하가 몰리면 Redis가 밀려 2초 타임아웃(`spring.data.redis.timeout`)에 걸립니다. 예측이 왜 틀렸는지 **원인까지 특정**해 결과로 남겼습니다.
+
+### ⑤ 좌석 대량 생성 — JPA 배치 설정이 통하지 않는 조건
+
+공연 하나 등록 시 좌석이 수천~수만 행 생성됩니다. `hibernate.jdbc.batch_size`를 켜도 전혀 빨라지지 않았는데,
+`seat.id`가 `AUTO_INCREMENT`(JPA `IDENTITY` 전략)라 Hibernate가 INSERT마다 생성 ID를 즉시 받아와야 해서 **배치를 스스로 포기**하기 때문입니다.
+→ 좌석 삽입 경로만 `JdbcTemplate.batchUpdate` + JDBC URL `rewriteBatchedStatements=true`(둘은 반드시 짝).
+MySQL `Com_insert` 상태값을 요청 전후로 비교해 **실제 실행된 INSERT 문 개수**로 검증.
+
+---
+
+## 7. 테스트 결과
+
+> 측정 환경: AWS EC2 `m6i.xlarge`(4 vCPU / 16 GiB) + RDS `db.m6i.large`, 2026-09-06.
+> 상세 수치·과정은 [`.claude/docs/test-results.md`](.claude/docs/test-results.md), 계획·근거는 [`.claude/docs/test-plan.md`](.claude/docs/test-plan.md).
+
+### 부하 테스트 (Gatling)
+
+| 지표 | 목표 | 실측 | 판정 |
+|---|---|---|---|
+| 동시 300명 좌석 홀드 P95 | < 2,000ms | **1,512ms** | ✅ |
+| 오버셀 | 0건 | **0건** (측정 세션 누적 약 2,000명) | ✅ |
+| 에러율 (경합 제외) | < 1% | 2.3% — 원인은 경합이 아닌 계정 토큰 충돌(401), 실질 통과권 | ✅ |
+| 한계 동시 사용자 | (참고, SLO 아님) | ~250~300명 (그 이상은 Redis 명령 타임아웃으로 붕괴 — 원인까지 진단) | 참고 |
+
+전 구간에서 **느리게/에러로 무너지되 틀리게 처리하지는 않았습니다**(오버셀 0).
+
+![부하 테스트 Grafana](docs/images/grafana-load-test.png)
+
+### 카오스 테스트 (장애 주입)
+
+| 시나리오 | 결과 |
+|---|---|
+| **A-1 — Redis 61초 완전 다운 → 복구** | 오버셀 **0** · `seat_status` 재구성 완료까지 **~5초** · 재구성 중 요청은 `503`으로 즉시 실패(부분 상태 미노출) |
+| **A-2 — Kafka 브로커 92초 완전 다운 → 복구** | 장애 중 결제 요청·웹훅 5xx **0건**(158건 전부 200) · 이벤트 유실 **0**(outbox 158 = 좌석 반납 158) · Consumer lag 자동 복구 |
+
+**A-2 핵심**: 응답시간·에러율 그래프만 봐서는 **언제 Kafka가 죽어 있었는지 알 수 없습니다** —
+결제 확정/실패가 DB 트랜잭션 + outbox INSERT라 Kafka와 동기적으로 얽히지 않기 때문입니다(Outbox 패턴이 Kafka를 critical path에서 제거).
+
+![카오스 A-2 Grafana](docs/images/grafana-chaos-kafka.png)
+
+---
+
+## 8. 실행 방법
+
+### 사전 준비
+
+- Docker / Docker Compose
+- JDK 21
+- Node.js 20.19+ 또는 22.12+ (Vite 8)
+
+### 1) 인프라 기동 (프로젝트 루트)
+
+```bash
+docker compose up -d          # MySQL · Redis · Kafka(KRaft) · Kafka Connect(Debezium) · Nginx · Prometheus · Grafana
+```
+
+### 2) 백엔드
+
+```bash
+cd ticketrush-backend
+# .env 파일 생성 (아래 키 필요)
+gradlew.bat bootRun           # POSIX: ./gradlew bootRun
+```
+
+`ticketrush-backend/.env` (gitignore 대상 — 새 환경에서 직접 생성):
+
+```
+# 필수
+JWT_SECRET=                   # HS256 이상, 32바이트 이상
+ADMIN_EMAIL=                  # 기동 시 자동 생성되는 ADMIN 계정
+ADMIN_PASSWORD=
+PORTONE_STORE_ID=             # GET /api/v1/payments/config 로 프론트에 전달 (공개 식별자)
+PORTONE_CHANNEL_KEY_TOSS=     # 카드
+PORTONE_CHANNEL_KEY_KAKAO=    # 간편결제
+PORTONE_WEBHOOK_SECRET=       # whsec_ 접두사 + base64. 없으면 웹훅을 전부 거절
+
+# 선택 (기본값 있음)
+JWT_ACCESS_EXPIRATION=1800000     # ms, 기본 30분
+JWT_REFRESH_EXPIRATION=604800000  # ms, 기본 7일
+REFRESH_COOKIE_SECURE=false       # 로컬(http)은 false
+FRONTEND_ORIGIN=http://localhost:5173
+PORTONE_API_SECRET=               # 서버 대 서버 결제 재검증용 (현재 미사용)
+```
+
+### 3) Debezium Outbox 커넥터 등록
+
+```powershell
+scripts/register-outbox-connector.ps1   # 컨테이너 재기동 시마다 재등록 필요
+```
+
+### 4) 프론트엔드
+
+```bash
+cd ticketrush-frontend
+npm install
+npm run dev                   # http://localhost:5173
+```
+
+### 테스트
+
+```bash
+cd ticketrush-backend
+gradlew.bat test
+```
+
+> 로컬에서는 포트원 웹훅이 도달하지 못해 결제창 호출 이후 "처리 중"에서 멈춥니다.
+> 결제 확정·웹훅 서명 검증은 AWS 배포 환경에서 실측 통과했습니다.
+
+---
+
+## 9. 프로젝트 구조
+
+```
+TicketRush/
+├── ticketrush-backend/          # Spring Boot 4.1 / Java 21 / Gradle
+│   └── src/main/java/com/ticketrush/ticketrush/
+│       ├── domain/{account,event,queue,seat,reservation}/   # 도메인별 controller/dto/entity/repository/service
+│       └── global/{config,entity,exception,jwt}/            # 공통
+├── ticketrush-frontend/         # React + Vite + TypeScript
+├── docker-compose.yml           # 로컬 개발 인프라 (+ .rehearsal / .capacity / .aws 오버레이)
+├── nginx/ · prometheus/ · grafana/
+├── scripts/                     # 커넥터 등록 · 부하/카오스 테스트 스크립트
+└── .claude/docs/                # 설계 문서
+    ├── decisions.md             # 기술 의사결정 로그 (근거 포함)
+    ├── architecture.md · db-schema.md · redis-design.md · api-design.md
+    ├── test-plan.md · test-results.md   # 부하/카오스 테스트 계획·실측
+    ├── aws-spec.md · aws-deploy.md      # AWS 스펙 산정·배포 런북
+    └── diagrams/                # 아키텍처 · ERD (draw.io)
+```
