@@ -30,13 +30,13 @@ CREATE TABLE account (
   email      VARCHAR(100) NOT NULL UNIQUE,
   password   VARCHAR(255) NOT NULL,
   role       ENUM('BUYER', 'ORGANIZER', 'ADMIN') NOT NULL,
-  status     ENUM('PENDING', 'ACTIVE') NOT NULL DEFAULT 'ACTIVE',
+  status     ENUM('PENDING', 'ACTIVE', 'SUSPENDED') NOT NULL DEFAULT 'ACTIVE',
   created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id)
 );
 ```
 
-- `status`: 애플리케이션 레벨에서 `role = 'ORGANIZER'`로 가입할 때만 `PENDING`으로 INSERT하고, 그 외(`BUYER`)는 기본값 `ACTIVE`를 그대로 쓴다. `ADMIN` 계정은 셀프 가입 대상이 아니므로(운영자가 직접 생성) 이 흐름과 무관하다.
+- `status`: 애플리케이션 레벨에서 `role = 'ORGANIZER'`로 가입할 때만 `PENDING`으로 INSERT하고, 그 외(`BUYER`)는 기본값 `ACTIVE`를 그대로 쓴다. `ADMIN` 계정은 셀프 가입 대상이 아니므로(운영자가 직접 생성) 이 흐름과 무관하다. `SUSPENDED`는 ADMIN이 계정을 정지시킨 상태(2026-09-06 B그룹, decisions.md 3번 — 소프트 삭제) — 로그인/토큰 재발급이 막히고 예약·매출 이력은 그대로 남는다.
 
 ---
 

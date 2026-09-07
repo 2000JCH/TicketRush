@@ -42,6 +42,7 @@ out/
 
 ### Private docs (not for GitHub) ###
 .claude/portfolio.md
+.claude/임시참조폴더/
 
 ### Generated load-test fixtures (seed-load-test.ps1 / seed-buyers-parallel.mjs / login-buyers.mjs output) ###
 **/src/gatling/resources/data/buyers.csv

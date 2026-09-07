@@ -246,36 +246,45 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 
 ## 6. 관리자 (Admin)
 
-`ADMIN`의 기능은 두 가지다: `ORGANIZER` 가입 승인(decisions.md 12번 — 이전까지는 역할만 정의되고 실제 쓰임이 없었다)과 이벤트 판매 현황 모니터링. 정산/알림 등 다른 관리 기능은 지금 보류하고, Kafka 소비자 구조를 확장 가능한 상태로만 열어둔다(decisions.md 7번).
+`ADMIN` 콘솔은 2026-09-06 저녁에 "B그룹"으로 정리됐다(사용자 확인 완료). 계정 관리(승인/거절/정지)와 콘서트 현황 조회로 구성된다. 정산/알림은 여전히 보류(decisions.md 7번). 모든 경로는 `SecurityConfig`의 `/api/v1/admin/**` → `hasRole("ADMIN")` 규칙이 접근을 통제한다.
 
-| 메서드 | 엔드포인트 | 설명 | 권한 |
-|---|---|---|---|
-| GET | /api/v1/admin/accounts/pending | 승인 대기 중인 ORGANIZER 목록 조회 | ADMIN |
-| PATCH | /api/v1/admin/accounts/{accountId}/approve | ORGANIZER 승인 (`PENDING` → `ACTIVE`) | ADMIN |
-| GET | /api/v1/admin/events/{eventId}/stats | 실시간 판매 현황 + 좌석 점유율 조회 | ADMIN |
+| 메서드 | 엔드포인트 | 설명 |
+|---|---|---|
+| GET | /api/v1/admin/accounts/pending | 승인 대기 중인 ORGANIZER 목록 (가입 순) |
+| GET | /api/v1/admin/accounts | 전체 회원 목록 — `role`/`status`/`email`(부분일치) 필터 + 페이지네이션(`page`/`size`, 최근 가입 순) |
+| GET | /api/v1/admin/accounts/{accountId}/reservations | 특정 회원의 예매 내역 (5번의 예약 상세 형식 배열) |
+| PATCH | /api/v1/admin/accounts/{accountId}/approve | ORGANIZER 승인 (`PENDING` → `ACTIVE`) |
+| DELETE | /api/v1/admin/accounts/{accountId} | ORGANIZER 승인 거절 — PENDING ORGANIZER 행 삭제(재가입 가능), 204 |
+| PATCH | /api/v1/admin/accounts/{accountId}/suspend | 계정 정지(소프트 삭제) — `ACTIVE` → `SUSPENDED` |
+| PATCH | /api/v1/admin/accounts/{accountId}/reactivate | 정지 해제 — `SUSPENDED` → `ACTIVE` |
+| GET | /api/v1/admin/events/stats | 콘서트별 판매 현황(전 콘서트 한 번에) |
 
-**승인 대기 목록 / 승인 응답** (구현 단계에서 확정 — 두 API가 같은 형식을 쓴다. 목록은 배열, 승인은 단건)
+**계정 응답** — `pending`/`approve`/`suspend`/`reactivate`가 모두 아래 `AccountResponse` 형식을 쓴다(목록은 배열, 단건은 객체). 비밀번호는 절대 담지 않는다.
 ```json
 { "accountId": 4, "email": "organizer@example.com", "role": "ORGANIZER", "status": "ACTIVE", "createdAt": "2026-08-17T13:23:21" }
 ```
-- 목록은 **먼저 가입한 순서**로 정렬한다(오래 기다린 사람이 위로). 관리자 전용 화면이라 트래픽이 적어 페이징은 두지 않는다.
-- 승인 응답으로 갱신된 계정을 그대로 돌려주므로, 관리자 화면은 재조회 없이 해당 행만 갱신하면 된다.
-- `BUYER`/`ADMIN` 계정에 승인을 시도하면 `INVALID_INPUT`으로 거절한다 — 승인 절차가 있는 역할은 `ORGANIZER`뿐이다.
 
-**판매 현황 조회 응답**
+**회원 목록 응답 (`GET /api/v1/admin/accounts`)** — 계정 수가 많아(수천~) 페이지네이션 필수. `content`만 도메인 객체이고 나머지는 페이지 메타.
 ```json
-{
-  "sections": [
-    { "sectionId": 10, "name": "VIP", "type": "SEATED", "totalSeats": 100, "occupiedSeats": 42, "occupancyRate": 0.42 },
-    { "sectionId": 11, "name": "스탠딩", "type": "STANDING", "totalQuantity": 2000, "remainingQuantity": 1832, "occupancyRate": 0.084 }
-  ],
-  "confirmedTicketCount": 38,
-  "inProgressTicketCount": 4
-}
+{ "content": [ /* AccountResponse[] */ ], "page": 0, "size": 20, "totalElements": 6364, "totalPages": 319 }
 ```
 
-- **데이터 원천**: 이 API는 새로운 데이터를 만들지 않고 이미 있는 값을 그대로 읽기만 한다. `occupiedSeats`(지정석)는 Redis `seat_status:{eventId}` Hash에서 `HELD`로 표시된 `seat:*` 필드 개수, `totalSeats`는 DB `seat` 테이블의 구역별 행 수. `remainingQuantity`(스탠딩)는 Redis `standing:{sectionId}` 필드 값. `confirmedTicketCount`/`inProgressTicketCount`는 DB `reservation`에서 `event_id`+`status`별 `quantity` 합계(`idx_event_status` 인덱스 활용, 추가 인덱스 불필요).
-- **"실시간"은 폴링으로 처리한다** — 화면이 자동으로 갱신되는 웹소켓/SSE 방식은 만들지 않는다. 관리자 화면이 몇 초 간격으로 이 API를 다시 호출하는 것으로 충분하다(트래픽이 적은 관리자 전용 화면이라 부담이 없고, 값 자체는 Redis/DB를 그때그때 읽으므로 매 호출이 항상 최신 값이다). 화면 자동 갱신이 나중에 필요해지면 이 엔드포인트를 그대로 두고 프론트에서 폴링 주기만 조절하면 된다.
+**계정 상태 전이 규칙(구현 단계 확정, 사용자 확인 완료 — 소프트 삭제 채택)**:
+- 정지는 상태를 `SUSPENDED`로 바꾸고 Redis `refresh_token:{accountId}`를 삭제한다 → 재로그인·토큰 재발급이 즉시 막힌다(`ACCOUNT_SUSPENDED`, 403). **이미 발급된 Access Token은 만료 전까지 유효**하다 — 즉시 차단하려면 JWT 필터가 매 요청 DB를 조회해야 해서 성능 트레이드오프가 있어 하지 않았다(알려진 한계).
+- `ADMIN` 계정은 정지할 수 없다(`INVALID_ACCOUNT_STATE`, 409). 이미 `SUSPENDED`인 계정 재정지, `ACTIVE`인 계정 정지 해제도 같은 코드로 거절한다.
+- 거절(`DELETE`)은 아직 한 번도 활성화된 적 없는 PENDING ORGANIZER만 대상이라 행을 삭제한다(예약/이벤트가 없어 FK 문제 없음). 그 외 상태는 `INVALID_ACCOUNT_STATE`.
+- 하드 삭제(임의 계정 행 DELETE)는 예약·매출 통계가 왜곡돼 채택하지 않았다(decisions.md).
+
+**콘서트별 판매 현황 응답 (`GET /api/v1/admin/events/stats`)** — 전 콘서트를 한 번에 배열로 반환한다(관리자 "콘서트 현황" 화면이 목록형이라, 원래 설계의 이벤트당 조회 대신 목록으로 바꿈).
+```json
+[
+  { "eventId": 12, "eventName": "OO 콘서트", "openAt": "2026-09-05T22:24:47",
+    "capacity": 200, "sold": 145, "remaining": 55,
+    "confirmedReservations": 130, "confirmedAmount": 14500000 }
+]
+```
+- `capacity` = 지정석 좌석 수(DB `seat`) + 스탠딩 총 수용 인원(`section.total_quantity` 합). `sold` = **`PAYMENT_CONFIRMED` 예약의 `quantity` 합**(취소·실패·진행 중은 제외). `remaining`은 0에서 클램프.
+- 이벤트별로 쿼리를 반복하지 않고 5개 집계(GROUP BY)를 한 번에 읽어 메모리에서 합친다. 실시간 홀드 현황(Redis)은 이 화면에 넣지 않는다 — "지금 몇 자리 팔렸나"는 확정 기준으로 보는 게 매출과 일관되기 때문(원래 설계의 Redis 기반 per-section occupancy는 보류).
 
 ---
 
@@ -290,6 +299,8 @@ Refresh Token은 httpOnly Cookie(Secure 속성 포함)로 전달한다(decisions
 | INVALID_TOKEN | 401 | 위변조·형식 오류·만료된 토큰. Access Token뿐 아니라 `/auth/refresh`의 Refresh Token 검증 실패(쿠키 없음/위조/만료/Redis 저장값과 불일치)에도 쓴다 — 어느 쪽이든 사용자가 할 일은 재로그인으로 같기 때문에 코드를 나누지 않았다(구현 단계에서 확정) |
 | UNAUTHORIZED | 401 | 인증 실패 |
 | ACCOUNT_PENDING | 403 | ORGANIZER 가입 후 관리자 승인 대기 중 로그인 시도 |
+| ACCOUNT_SUSPENDED | 403 | 정지된 계정의 로그인/토큰 재발급 시도 (구현 단계에서 추가, B그룹) |
+| INVALID_ACCOUNT_STATE | 409 | 현재 계정 상태에서 불가능한 관리자 작업 (ADMIN 정지 / 이미 정지된 계정 재정지 / ACTIVE 계정 정지 해제 / PENDING 아닌 계정 거절) (구현 단계에서 추가, B그룹) |
 | ENTRY_TOKEN_REQUIRED | 401 | `X-Entry-Token` 헤더 누락 |
 | ENTRY_TOKEN_EXPIRED | 401 | 입장 토큰 만료 — 대기열 재진입 필요(decisions.md 4번) |
 | QUEUE_ENTRY_NOT_FOUND | 404 | `GET /queue/entries/me` 조회 시 대기열에도 입장 토큰에도 기록이 없음 — 진입한 적이 없거나 토큰이 만료된 상태(구현 단계에서 추가) |
