@@ -59,6 +59,9 @@ public class AuthService {
         if (account.isPending()) {
             throw new BusinessException(ErrorCode.ACCOUNT_PENDING);
         }
+        if (account.isSuspended()) {
+            throw new BusinessException(ErrorCode.ACCOUNT_SUSPENDED);
+        }
 
         return issueTokens(account);
     }
@@ -84,6 +87,11 @@ public class AuthService {
 
         Account account = accountRepository.findById(accountId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_TOKEN, REFRESH_FAILED_MESSAGE));
+        // 정지된 계정은 아직 유효한 Refresh Token으로도 재발급받지 못한다(정지 시 Redis 토큰을
+        // 지우지만, 그 사이 쿠키를 들고 있던 요청까지 여기서 막는다).
+        if (account.isSuspended()) {
+            throw new BusinessException(ErrorCode.ACCOUNT_SUSPENDED);
+        }
 
         return issueTokens(account);
     }

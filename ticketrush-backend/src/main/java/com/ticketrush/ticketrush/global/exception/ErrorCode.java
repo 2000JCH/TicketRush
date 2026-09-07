@@ -17,8 +17,10 @@ public enum ErrorCode {
     // 로그인 실패 시에는 AuthService가 더 구체적인 메시지를 덧붙인다.
     UNAUTHORIZED(HttpStatus.UNAUTHORIZED, "인증이 필요합니다."),
     ACCOUNT_PENDING(HttpStatus.FORBIDDEN, "관리자 승인 대기 중입니다."),
+    ACCOUNT_SUSPENDED(HttpStatus.FORBIDDEN, "정지된 계정입니다. 관리자에게 문의해주세요."),
     FORBIDDEN(HttpStatus.FORBIDDEN, "접근 권한이 없습니다."),
     ACCOUNT_NOT_FOUND(HttpStatus.NOT_FOUND, "계정을 찾을 수 없습니다."),
+    INVALID_ACCOUNT_STATE(HttpStatus.CONFLICT, "현재 계정 상태에서는 할 수 없는 작업입니다."),
     EMAIL_ALREADY_EXISTS(HttpStatus.CONFLICT, "이미 사용 중인 이메일입니다."),
     ACCOUNT_ALREADY_APPROVED(HttpStatus.CONFLICT, "이미 승인된 계정입니다."),
     EVENT_NOT_FOUND(HttpStatus.NOT_FOUND, "이벤트를 찾을 수 없습니다."),

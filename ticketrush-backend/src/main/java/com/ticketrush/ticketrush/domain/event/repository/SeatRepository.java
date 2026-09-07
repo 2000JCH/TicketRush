@@ -27,6 +27,15 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
     /** 좌석 상태 조회 API(api-design.md 4번)에서 좌석 배치 순서대로 내려주기 위해 정렬해서 조회한다. */
     List<Seat> findAllBySectionIdOrderByRowNoAscSeatNoAsc(Long sectionId);
 
+    /** 관리자 콘서트 현황 — 이벤트별 지정석 총 좌석 수. */
+    @Query("SELECT s.section.event.id AS eventId, COUNT(s) AS seatCount FROM Seat s GROUP BY s.section.event.id")
+    List<EventSeatCountRow> countSeatsPerEvent();
+
+    interface EventSeatCountRow {
+        Long getEventId();
+        long getSeatCount();
+    }
+
     /**
      * 그룹 좌석 홀드의 DB 비관적 락 구현(decisions.md 2번)에서만 쓴다. seat 행 자체를 뮤텍스로
      * 빌리는 것뿐이라 반환값은 쓰지 않고, 호출하는 트랜잭션이 끝날 때까지 해당 행을 잠근다.

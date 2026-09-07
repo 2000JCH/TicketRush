@@ -46,4 +46,25 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
         Long getSectionId();
         Integer getTotal();
     }
+
+    /**
+     * 관리자 콘서트 현황 — 이벤트별 확정 매출 집계. 취소(SEAT_RELEASED)·실패·진행 중
+     * (PAYMENT_REQUESTED)은 제외하고 PAYMENT_CONFIRMED만 센다. `tickets`는 좌석 수(지정석) +
+     * 매수(스탠딩)의 합이다(`Reservation.quantity`가 둘 다 커버).
+     */
+    @Query("SELECT r.event.id AS eventId, "
+            + "COALESCE(SUM(r.quantity), 0) AS tickets, "
+            + "COALESCE(SUM(r.amount), 0) AS amount, "
+            + "COUNT(r) AS reservations "
+            + "FROM Reservation r "
+            + "WHERE r.status = com.ticketrush.ticketrush.domain.reservation.entity.ReservationStatus.PAYMENT_CONFIRMED "
+            + "GROUP BY r.event.id")
+    List<EventSalesRow> aggregateConfirmedSalesByEvent();
+
+    interface EventSalesRow {
+        Long getEventId();
+        long getTickets();
+        long getAmount();
+        long getReservations();
+    }
 }

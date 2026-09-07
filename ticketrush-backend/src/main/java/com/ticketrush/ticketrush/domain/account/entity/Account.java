@@ -67,12 +67,30 @@ public class Account extends BaseTimeEntity {
         return status == AccountStatus.PENDING;
     }
 
+    public boolean isSuspended() {
+        return status == AccountStatus.SUSPENDED;
+    }
+
     public boolean isOrganizer() {
         return role == Role.ORGANIZER;
     }
 
+    public boolean isAdmin() {
+        return role == Role.ADMIN;
+    }
+
     /** ADMIN 승인. 이 시점부터 로그인이 가능해진다(decisions.md 12번). */
     public void approve() {
+        this.status = AccountStatus.ACTIVE;
+    }
+
+    /** ADMIN이 계정을 정지시킨다(소프트 삭제). 로그인/재발급이 막힌다. */
+    public void suspend() {
+        this.status = AccountStatus.SUSPENDED;
+    }
+
+    /** 정지 해제 — ACTIVE로 되돌린다. PENDING(승인 대기)이었던 계정은 이 경로로 되돌리지 않는다. */
+    public void reactivate() {
         this.status = AccountStatus.ACTIVE;
     }
 }

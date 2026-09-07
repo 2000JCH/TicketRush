@@ -208,8 +208,16 @@ public class ReservationService {
 
     @Transactional(readOnly = true)
     public List<ReservationDetailResponse> findMyReservations(Long accountId) {
-        List<Reservation> reservations =
-                reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId);
+        return toDetailResponses(reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId));
+    }
+
+    /** 관리자가 특정 회원의 예매 내역을 조회한다(소유자 검증 없음 — /api/v1/admin/** 권한이 담당). */
+    @Transactional(readOnly = true)
+    public List<ReservationDetailResponse> findReservationsByAccount(Long accountId) {
+        return toDetailResponses(reservationRepository.findAllByAccountIdOrderByRequestedAtDesc(accountId));
+    }
+
+    private List<ReservationDetailResponse> toDetailResponses(List<Reservation> reservations) {
         if (reservations.isEmpty()) {
             return List.of();
         }
