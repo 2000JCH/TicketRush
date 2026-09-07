@@ -325,15 +325,28 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - 헤더에서 ADMIN에게 "내 예약" 숨김.
   - **검증**: `tsc -b`/`oxlint`/`vite build` 통과. 브라우저에서 목록/상세/모달/대기열/로그인/관리자 3화면 사용자 확인 완료. 백엔드 변경 없음(전부 CSS + 라우팅 + 소량 JSX).
   - `.claude/임시참조폴더/`(레퍼런스 스크린샷)는 `.gitignore`에 추가 — 저장소에 안 올림.
+  - **커밋·푸시 완료**: `972783f` feat(admin) / `0c5b3c7` feat(frontend) / `275f1da` docs.
 
-**다음 작업(사용자와 합의한 순서)**:
-1. ~~로컬 시연 흐름 테스트~~ / ~~프론트 수정(A그룹)~~ / ~~결제 SDK 연동(로컬)~~ / ~~B그룹 관리자 콘솔~~ / ~~B그룹 프론트 브라우저 확인~~ / ~~프론트 UI 개편~~ — 완료
-2. **B그룹 + UI 개편 커밋 (3분할, push는 사용자)** — `feat(admin):` 백엔드 / `feat(frontend):` 프론트 전체 / `docs:` 문서+gitignore
-3. AWS 재배포(EC2 `m6i.xlarge`+RDS `db.m6i.large` 재생성 — 보안그룹/키페어 남겨둬서 이번엔 더 빠름, 대략 25~35분 예상)
-4. AWS에서 결제 포함 전체 흐름 테스트 + 웹훅 서명 실측 검증
-5. AWS에서 정식 시연 녹화
-6. 지금까지 문서화한 내용을 합쳐 포트폴리오 파일 1개로 제작(`all/classq/.claude/정찬혁_ClassQ_포트폴리오.pdf` 형식 참고)
-7. 프로젝트 최종 마무리 시 `README.md` 갱신
+- **2026-09-07 (오후): AWS 재배포 + 포트원 웹훅 실측 검증 성공 + 주최자 공연 등록 폼 추가.**
+  - **AWS 재배포**: 남겨둔 리소스(SG 2개·키페어·DB 서브넷/파라미터 그룹) 전부 재사용, 개발 PC IP도 안 바뀜. RDS `ticketrush-db`(db.m6i.large, mysql 8.0.42) + EC2 `ticketrush-ec2`(m6i.xlarge, AL2023) 생성 → `docker-compose.aws.yml`로 스택 기동 → 프론트 dist는 로컬에서 `VITE_API_BASE_URL=` 빈 값 빌드해서 scp(nginx 같은 오리진 `/api/` 상대경로). 신규 `scripts/register-outbox-connector.aws.sh`(로컬 버전의 RDS 대응 — hostname/user/pw를 env에서), 신규 런북 `.claude/docs/aws-deploy.md`(2026-09-06 배포엔 런북이 없었음). 시드는 로컬과 동일(계정 6·이벤트 5).
+  - **포트원 V2 웹훅 실측 검증 — 통과.** 콘솔에서 **결제모듈 V2 → 테스트 모드**에 웹훅 URL 등록(V1 아님). 테스트 모드는 실연동과 시크릿이 달라 `.env`의 `PORTONE_WEBHOOK_SECRET`을 테스트 시크릿으로 교체(실연동 값은 `ticketrush-backend/.env.bak-*`에 보관). 브라우저에서 카드(토스페이먼츠 테스트) 결제 → 포트원(`52.78.5.241`, `AHC/2.1`)이 `Transaction.Ready`/`Transaction.Paid` 웹훅 발송 → **전부 200(서명 검증 통과) → `PAYMENT_CONFIRMED` 전이 + 좌석 SOLD 확인**. **Standard Webhooks 가정이 맞았다** — `PaymentWebhookService` 수정 불필요(decisions.md 5번 "가정, 미검증" → **검증 완료**로 갱신). 이번 AWS 작업의 최대 리스크였는데 한 번에 통과.
+  - **배포 중 고친 버그**: `SeatHoldPage`가 멱등키 생성에 `crypto.randomUUID()`를 쓰는데, 이 API는 **보안 컨텍스트(HTTPS·localhost)에서만** 보장돼 평문 `http://` AWS에서 Chrome이 `undefined` → `POST /reservations` 요청 자체가 안 나가고 "알 수 없는 오류". 신규 `src/lib/randomId.ts`(`crypto.getRandomValues` 폴백 + 최후 `Date.now`+`Math.random`)로 교체. `fix(frontend)`.
+  - **발견(미해결, 별개)**: `DELETE /events/{id}`가 로컬·AWS 둘 다 **500**(`TransientPropertyValueException: Section references an unsaved transient instance of Event`). perf 커밋 `603e308`에서 `deleteSectionsAndSeats`가 `sectionRepository.findAllByEventId`로 Section 엔티티를 영속성 컨텍스트에 올린 뒤 bulk `deleteAllByEventId` + `eventRepository.delete(event)` → flush 시 desync. 이벤트 삭제/전체교체 공유 로직이라 PUT도 영향 가능성. **UI 없고(C그룹 제외) 데모 경로 아님 → 마감 후 처리**(bulk delete 앞에 `flush()`/`clear()` 또는 ID projection 조회로 수정 예정).
+  - **주최자 공연 등록 폼 추가(Option A, 프론트만)**: 사용자가 "간단하게라도 브라우저에서 주최자가 공연 등록"을 요청. **이벤트 승인 단계는 마감 때문에 안 만듦**(계정 승인만) — 승인된 주최자가 등록하면 바로 목록 노출. 신규 `OrganizerEventCreatePage`(`/organizer/events/new`, 공연명·오픈일시·구역 동적 추가[지정석 행·열 / 스탠딩 수량]), `ProtectedRoute`에 `organizerOnly` 프롭, 헤더에 `role === "ORGANIZER"`면 "공연 등록" 링크, `api/events.ts`에 `createEvent`. 기존 API `POST /api/v1/events` 그대로 호출 — 폼으로 만든 공연도 시드된 공연과 동일(좌석 생성·대기열·홀드·결제 전부). **C그룹 일부만 이번에 포함**(생성 UI만, 시간·좌석배치 세밀 입력 UI는 여전히 없음).
+  - 검증: `tsc -b`/`oxlint`/`vite build` 통과, 로컬에서 `POST /events` 계약 확인(201). 브라우저 폼 테스트 사용자 확인 완료.
+
+**다음 작업(사용자와 합의한 순서 — 2026-09-07 밤, 내일 아침 제출 목표)**:
+1. ~~AWS 재배포~~ / ~~웹훅 검증~~ / ~~주최자 등록 폼~~ — 완료
+2. **커밋 (fix/feat/deploy/docs 분할, push는 사용자)** → EC2 `git pull` + 프론트 dist 재배포
+3. **AWS에서 전체 시연 녹화** (① 구매자 예매→결제 ② 주최자 가입→승인→공연 등록 ③ 관리자 콘솔) — 캡컷 편집
+4. AWS 리소스 삭제 (EC2/RDS)
+5. **시스템 아키텍처 다이어그램** (mermaid)
+6. **ERD** (mermaid, db-schema.md 기반)
+7. **처리 흐름도** (시퀀스 2~3개: 예매 골든패스 / Saga 보상 / Redis rebuild)
+8. **포트폴리오 PDF** (`all/classq/.claude/정찬혁_ClassQ_포트폴리오.pdf` 형식 참고)
+9. **README.md 갱신**
+10. **발표자료 PPT**
+11. **발표 대본**
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 
