@@ -13,7 +13,7 @@
 ![AWS](https://img.shields.io/badge/AWS-EC2%20%2B%20RDS-FF9900)
 ![React](https://img.shields.io/badge/React-19%20%2B%20Vite%20%2B%20TS-61DAFB)
 
-**기간** 2026.08 ~ 2026.09 (30일) · **인원** 1인 · **저장소** https://github.com/2000JCH/TicketRush
+**기간** 2026.08 \~ 2026.09 (30일) · **인원** 1인 · **저장소** https://github.com/2000JCH/TicketRush
 
 🔗 시연 영상: *(링크 추가 예정)* · 📄 포트폴리오: [TicketRush 부하/장애테스트_요약](https://app.notion.com/p/3d78d16f89fd80bea748fbbb82f8173f)
 
@@ -82,7 +82,7 @@
 ![ERD](docs/images/erd.png)
 
 - 테이블 7개. 상세 스키마·인덱스 근거는 [`.claude/docs/db-schema.md`](.claude/docs/db-schema.md)
-- `SEAT_HELD`는 **DB에 저장하지 않습니다** — 홀드는 TTL 5~10분짜리 Redis 전용 임시 상태이고,
+- `SEAT_HELD`는 **DB에 저장하지 않습니다** — 홀드는 TTL 5\~10분짜리 Redis 전용 임시 상태이고,
   `reservation` 행 자체가 결제 요청(`PAYMENT_REQUESTED`) 시점부터 생성됩니다.
 - 스탠딩 예약은 `reservation_seat` 행이 없습니다(`quantity`만으로 수량 표현).
 - `outbox_events`는 다른 테이블과 FK로 연결되지 않습니다 — Debezium이 binlog로만 읽고 `aggregate_id`로 논리 참조만 합니다.
@@ -93,49 +93,48 @@
 
 ### Backend
 
-| 기술 | 역할 / 선택 이유 |
+| 기술 | 역할 |
 |---|---|
-| **Java 21 · Spring Boot 4.1 · Gradle** | 최신 스택 학습 목적. Jackson 3 전환(`tools.jackson.*`), Kafka auto-config 분리 등 메이저 버전 전환 이슈를 직접 겪음 |
-| **Spring Data JPA / Hibernate** | 엔티티에서 테이블 자동 생성(`ddl-auto=update`). Flyway는 도입하지 않고 생성 컬럼·CHECK 제약은 애플리케이션 레벨 검증으로 대체 |
-| **Spring Security + JJWT** | JWT 인증(Access 단기 + Refresh 회전). 스케일아웃 시 세션 공유 불필요. Refresh Token은 httpOnly Cookie(XSS 완화) + Redis 저장(즉시 무효화). JSON 처리기는 Jackson 3 호환 문제로 `jjwt-gson` |
-| **Spring Data Redis + Redisson 4.7** | Redis 접근 + 그룹 홀드용 분산락(RLock). Redisson은 core만 추가하고 `RedissonClient` 직접 구성(Jackson 2/3 충돌 회피) |
-| **Spring for Apache Kafka** | `@KafkaListener`로 `PAYMENT_FAILED` 이벤트 소비 → 좌석 반납. Boot 4는 `spring-boot-starter-kafka` 필수([6번 ③](#6-기술적-의사결정--트러블슈팅)) |
-| **Spring Boot Actuator + Micrometer** | `/actuator/prometheus` 하나로 API 응답시간·HikariCP 커넥션 풀·Kafka Consumer lag를 자동 노출(별도 exporter 불필요) |
+| **Java 21 · Spring Boot 4.1 · Gradle** | 백엔드 언어 / 프레임워크 / 빌드 도구 |
+| **Spring Data JPA / Hibernate** | ORM, 엔티티 매핑 |
+| **Spring Security + JJWT** | JWT 기반 인증/인가 |
+| **Spring Data Redis + Redisson 4.7** | Redis 클라이언트 + 그룹 홀드용 분산락(RLock) |
+| **Spring for Apache Kafka** | `@KafkaListener`로 `PAYMENT_FAILED` 이벤트 소비 |
+| **Spring Boot Actuator + Micrometer** | `/actuator/prometheus`로 메트릭 노출 |
 
 ### Data & Messaging
 
 | 기술 | 역할 / 선택 이유 |
 |---|---|
-| **MySQL 8** | 정합성의 원천(`reservation`·`reservation_seat`·`outbox_events`). 결제 확정은 반드시 여기 동기 기록. 좌석 대량 생성만 `JdbcTemplate` batch |
+| **MySQL 8** | 정합성의 원천(`reservation`·`reservation_seat`·`outbox_events`). 결제 확정은 반드시 여기 동기 기록 |
 | **Redis 7.2** | 대기열(Sorted Set)·좌석 상태(Hash)·홀드 TTL·멱등키(`SETNX`). 싱글 스레드 원자성으로 좌석 1개·스탠딩 재고는 **락 없이** 오버셀 차단. AOF/RDB 비활성(`HELD`는 휘발돼도 되는 임시 상태) |
 | **Apache Kafka (KRaft)** | 결제 확정 "이후" 후속 작업을 사용자 응답과 분리. 좌석 동시성 제어 자체는 Kafka가 아니라 Redis가 담당 |
 | **Debezium (Kafka Connect)** | MySQL binlog CDC → `outbox_events` 변경을 Kafka 토픽으로 발행. 애플리케이션이 Kafka로 직접 publish하지 않음(Outbox 패턴) |
 
 ### Infra & Deploy
 
-| 기술 | 역할 / 선택 이유 |
+| 기술 | 역할 |
 |---|---|
-| **Docker / Docker Compose** | 로컬 개발 인프라 + AWS 배포 단위. 앱도 `Dockerfile`로 컨테이너화(리허설·배포는 컨테이너, 평소 개발은 `bootRun`) |
-| **AWS EC2 (`m6i.xlarge`, Amazon Linux 2023)** | 앱 + Redis + Kafka + Kafka Connect + Nginx를 단일 인스턴스에 co-location. EKS·ElastiCache·MSK는 [의도적으로 미도입](#3-시스템-아키텍처) |
-| **AWS RDS (MySQL 8, `db.m6i.large`)** | 관리형 DB. binlog 파라미터 그룹(`binlog_format=ROW`)으로 Debezium 연동 |
-| **Nginx** | 대기열 진입 API Rate Limiter(5r/s) + 프론트 정적 파일 서빙 + `/api` 리버스 프록시. 순서 보장은 Redis 대기열이 담당 |
+| **Docker / Docker Compose** | 로컬 개발 인프라 + AWS 배포 단위 |
+| **AWS EC2 (`m6i.xlarge`)** | 앱 + Redis + Kafka + Kafka Connect + Nginx co-location |
+| **AWS RDS (MySQL 8, `db.m6i.large`)** | 관리형 DB |
+| **Nginx** | 대기열 진입 API Rate Limiter + 정적 파일 서빙 + 리버스 프록시 |
 
 ### Frontend
 
-| 기술 | 역할 / 선택 이유 |
+| 기술 | 역할 |
 |---|---|
-| **React 19 · Vite · TypeScript** | 데모 프론트엔드. Access Token은 메모리에만, 새로고침 시 `/auth/refresh`로 세션 조용히 복구, 만료 시 자동 재발급 후 원요청 1회 재시도 |
-| **React Router 7** | SPA 라우팅. `ProtectedRoute`의 `adminOnly`/`organizerOnly` 프롭으로 역할별 화면 분리 |
-| **@portone/browser-sdk** | 포트원 V2 결제창 호출(`PortOne.requestPayment()`). 카드=토스페이먼츠 / 카카오페이=간편결제 |
+| **React 19 · Vite · TypeScript** | 데모 프론트엔드 SPA |
+| **React Router 7** | 라우팅, 역할별(`adminOnly`/`organizerOnly`) 화면 분리 |
+| **@portone/browser-sdk** | 포트원 V2 결제창 호출 |
 
 ### Test & Observability
 
 | 기술 | 역할 / 선택 이유 |
 |---|---|
-| **Gatling** | 부하 테스트 + 카오스 중 부하 발생을 하나의 시나리오(`GoldenPathSimulation`)로 통일. 별도 Controller/Agent 서버 없이 시나리오 코드만으로 실행 |
-| **Prometheus + Grafana** | 부하/카오스 테스트 관찰(로컬·측정 세션 한정). 4패널 대시보드: 응답시간 P50/95/99 · 상태코드별 요청/에러율 · Kafka lag · HikariCP |
-| **JUnit 5** | Saga 상태 전이(확정/실패), 그룹 홀드 동시성(오버셀 0) 등 |
-| **포트원(PortOne) V2** | 결제 연동. V2는 PG사와 무관하게 웹훅 페이로드·서명 검증(Standard Webhooks)을 통일 — 채널이 여러 개여도 웹훅 로직을 나눌 필요 없음 |
+| **Gatling** | 부하 테스트 도구. nGrinder는 컨트롤러+에이전트를 별도 서버로 띄워야 하는데, Gatling은 Gradle 플러그인만으로 로컬 PC에서 별도 설치 없이 바로 실행 가능해 1인 프로젝트에 적합. 부하 테스트 시나리오(`GoldenPathSimulation`)를 카오스 테스트 중 부하 발생에도 그대로 재사용 |
+| **Prometheus + Grafana** | 부하/카오스 테스트 관찰용 대시보드(응답시간 P50/95/99 · 에러율 · Kafka lag · HikariCP) |
+| **JUnit 5** | 단위/통합 테스트(Saga 상태 전이, 그룹 홀드 동시성 등) |
 
 ---
 
@@ -171,17 +170,17 @@ jar 안의 `AutoConfiguration.imports`를 직접 열어 원인을 1차 자료로
 
 AWS 배포 전, EC2/RDS 스펙만큼 리소스를 제한한 로컬 리허설 스택으로 한계 테스트를 먼저 돌렸습니다.
 로컬(2 vCPU)에서는 **HikariCP 커넥션 풀**이 1순위 병목이었고 — `GET /seats`가 등록 후 안 바뀌는 좌석 배치도를
-매번 DB에서 다시 읽고 있어 좌석 배치도 Redis 캐싱(`SeatCatalogRepository`)으로 P95를 32~46% 개선했습니다.
+매번 DB에서 다시 읽고 있어 좌석 배치도 Redis 캐싱(`SeatCatalogRepository`)으로 P95를 32\~46% 개선했습니다.
 그런데 **AWS(4 vCPU)에서도 절벽이 나타났고**, 원인은 HikariCP가 아니라
 **Redis 명령 타임아웃**이었습니다 — Redis를 app·Kafka와 같은 EC2 한 대에서 CPU를 나눠 쓰는 구조([ElastiCache 미도입](#3-시스템-아키텍처)의 결과)에서
 부하가 몰리면 Redis가 밀려 2초 타임아웃(`spring.data.redis.timeout`)에 걸립니다. 예측이 왜 틀렸는지 **원인까지 특정**해 결과로 남겼습니다.
-절벽의 정확한 위치(최초 측정 250~300명대 → 인스턴스를 새로 띄워 재검증하니 450~500명대)는 AWS 인스턴스 배정마다 달랐지만,
+절벽의 정확한 위치(최초 측정 250\~300명대 → 인스턴스를 새로 띄워 재검증하니 450\~500명대)는 AWS 인스턴스 배정마다 달랐지만,
 **같은 로그(`RedisCommandTimeoutException`)로 원인이 동일함을 두 번 다 확인**했습니다 — 클라우드 환경에서는 병목의 정체와
 절대 임계값을 구분해서 봐야 한다는 것도 실측으로 배운 지점입니다.
 
 ### ⑤ 좌석 대량 생성 — JPA 배치 설정이 통하지 않는 조건
 
-공연 하나 등록 시 좌석이 수천~수만 행 생성됩니다. `hibernate.jdbc.batch_size`를 켜도 전혀 빨라지지 않았는데,
+공연 하나 등록 시 좌석이 수천\~수만 행 생성됩니다. `hibernate.jdbc.batch_size`를 켜도 전혀 빨라지지 않았는데,
 `seat.id`가 `AUTO_INCREMENT`(JPA `IDENTITY` 전략)라 Hibernate가 INSERT마다 생성 ID를 즉시 받아와야 해서 **배치를 스스로 포기**하기 때문입니다.
 → 좌석 삽입 경로만 `JdbcTemplate.batchUpdate` + JDBC URL `rewriteBatchedStatements=true`(둘은 반드시 짝).
 MySQL `Com_insert` 상태값을 요청 전후로 비교해 **실제 실행된 INSERT 문 개수**로 검증.
@@ -200,7 +199,7 @@ MySQL `Com_insert` 상태값을 요청 전후로 비교해 **실제 실행된 IN
 | 동시 300명 좌석 홀드 P95 | < 2,000ms | **875ms** | ✅ |
 | 오버셀 | 0건 | **0건** (전 측정 세션 누적) | ✅ |
 | 에러율 (경합 제외) | < 1% | 0% (N=300 기준) | ✅ |
-| 한계 동시 사용자 | (참고, SLO 아님) | ~450~500명 (그 이상은 Redis 명령 타임아웃으로 붕괴 — 원인까지 진단) | 참고 |
+| 한계 동시 사용자 | (참고, SLO 아님) | 450\~500명 (그 이상은 Redis 명령 타임아웃으로 붕괴 — 원인까지 진단) | 참고 |
 
 전 구간에서 **느리게/에러로 무너지되 틀리게 처리하지는 않았습니다**(오버셀 0).
 
