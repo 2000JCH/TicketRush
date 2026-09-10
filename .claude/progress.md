@@ -1,6 +1,73 @@
 # TicketRush — 진행 상황
 
-설계 문서(`decisions.md`/`architecture.md`/`db-schema.md`/`redis-design.md`/`api-design.md`)는 1차 작성이 전부 끝난 상태이고, 이후 구현 단계에서 드러난 세부 사항은 그때그때 각 문서에 직접 반영한다 — 여기 별도로 요약해두지 않는다(중복·오래된 스냅샷이 되기 쉬워 2026-08-27에 정리함). 지금 진행 상황은 아래 "구현 진행 상황"의 가장 최근 날짜 항목과 "주차별 일정" 표를 보면 된다.
+인턴십 프로젝트는 구현 → 부하/카오스 테스트 → AWS 배포 → 발표(2026-09-08)까지 전부 끝났다. 남은 건 취업 지원용 산출물(이력서·포트폴리오 PDF·PPT S12/S13용 깨끗한 AWS 그래프)뿐 — 아래 "내일 할 일" 참고. "구현 진행 상황"은 날짜별 히스토리 기록으로 보존한다. 설계 문서(`decisions.md`/`architecture.md`/`db-schema.md`/`redis-design.md`/`api-design.md`)의 세부는 각 문서에 직접 반영돼 있다.
+
+## 2026-09-10 완료 — 취업 지원용 산출물 1차 완성
+
+**AWS 재측정(v2)**: Grafana 대시보드 에러율 % 패널 개선(로컬 검증) → AWS 재배포 → 부하 사다리(15,000석 이벤트, N=100~500) + 카오스 A-1(Redis)·A-2(Kafka) 재실행 → 스크린샷(`aws-remeasure-v2/`) → `test-results.md`(6-1·5-2-v2 섹션) 기록 → EC2/RDS 완전 삭제(과금 0 확인). 절벽 위치가 원본(09-06)보다 늦게 나온 것(250~300→500)까지 원인(같은 메커니즘, 인스턴스 변동성)을 로그로 확인해 정직하게 남김.
+**이력서(Notion)**: Project 섹션에 TicketRush 신규 작성(ClassQ 형식과 톤 맞춤, 소재 5·6·7·8 기반). Skills에 Redisson 추가 대기, RDS는 사용자가 직접 반영.
+**포트폴리오(Notion 페이지)**: "TicketRush 부하/장애테스트_요약" 신규 — 분산락 벤치마크·카오스 A-1/A-2·한계테스트 4개 표 + 스크린샷 6장(Notion에 직접 업로드). "한계와 다음 단계" 섹션은 뺌(다음 단계만 필요시 재고려).
+
+## 내일 할 일 (2026-09-11)
+
+이력서(Notion)와 포트폴리오(Notion 페이지) **다듬기** — 사실관계 확인, 문장 다듬기, 추가/삭제 판단. 새로 만들 건 없고 어제 만든 걸 검토하는 단계.
+
+### 오전 (AWS 비용 0)
+
+1. **이력서(사람인) 업데이트** — TicketRush 인턴 프로젝트 반영. 담당업무/성과 확정본은 아래 "이력서 담당업무 확정본".
+2. **shot list 확정** — 포트폴리오 PDF에 들어갈 스크린샷 목록을 먼저 정한다("AWS 켜놓고 뭘 찍지" 헤매지 않도록).
+3. **Grafana 대시보드 수정** (`grafana/dashboards/ticketrush.json`) — 로컬 `docker compose` + 짧은 Gatling으로 패널 모양 검증. AWS 켜기 전에 끝낸다.
+   - 패널 2(`요청/에러율`) → **"에러율 %"**로 교체: `5xx 비율`(빨강, 항상 ~0) + `4xx 비율`(주황) 2선만, stacking 끔, unit = percent(0–100). 카오스 A-1(주황 스파이크→복구)·A-2(둘 다 바닥 평탄)가 한눈에 보이게.
+   - 응답시간 패널 `uri` 기본값 `All` → 좌석 홀드 엔드포인트로 고정(표의 Gatling 좌석홀드 P95와 숫자 일치).
+4. **프론트 화면 스크린샷** — 로컬에서 확보(무료): 회원가입/로그인, 이벤트 상세, 내 예약, 내 정보, 관리자 3종(승인·회원·현황), 주최자 공연 등록, 포트원 결제창.
+
+### 낮 (AWS ~2~3달러)
+
+5. **AWS 재배포** — `.claude/docs/aws-deploy.md` 런북. 남겨둔 리소스(SG 2개·키페어·DB 서브넷/파라미터 그룹) 재사용.
+6. **부하 사다리 재측정** — 100→250→350→450→500, 각 N 실행 사이 30초+ 간격(또는 Grafana annotation으로 N 라벨) → 계단이 N별로 구분되게.
+7. **카오스 A-1(Redis)·A-2(Kafka) 재실행** — 개선된 "에러율 %" 패널로 캡처.
+8. **스크린샷 → `.claude/screenshots/tests/aws-remeasure-v2/`**, 그다음 EC2/RDS 삭제.
+
+### 오후 (AWS 비용 0)
+
+9. **README 정리** — (a) `docs/images/grafana-load-test.png`·`grafana-chaos-kafka.png`를 v2 깨끗한 그래프로 교체(§7이 이걸 씀), (b) "시연영상 링크"·"포트폴리오 PDF 링크" 자리표시자 채우기.
+10. **포트폴리오 PDF** — README + `portfolio.md` 상세 수치 확장 → HTML → 브라우저 PDF 저장 → repo `docs/`에 커밋, README에서 상대경로 링크(classq `정찬혁_ClassQ_포트폴리오.pdf` 참고).
+11. **최종 커밋** — v2 스크린샷 / 대시보드 수정 / README 이미지·링크 / 포트폴리오 PDF. push는 사용자.
+
+> **발표 PPT는 발표용으로 끝 — v2 그래프 다시 안 넣는다**(2026-09-09 확인). v2 그래프는 README·포트폴리오 PDF에만 반영.
+
+### 주의
+
+- 재측정해도 표 수치(`test-results.md` §5·§6)는 **이미 정확** — 목적은 "깨끗한 그래프 화면"뿐. 새 값이 기존과 크게 다르면 별도 원인 조사.
+- `aws-remeasure/`(구버전) 스크린샷이 못 쓰는 이유: `요청/에러율` 패널이 상태코드 7개(200·201·400·401·404·409·500)를 stacked로 그려 성공(201)이 에러(4xx/5xx)를 가림 + 절벽 그래프가 uri=All이라 표와 숫자 불일치 + 계단에 N 라벨 없음.
+- PPT 미수정 경미 오류 2개는 **포트폴리오·README에서는 안 틀리게**: S8 스탠딩 "Redis DECR" → 실제 코드 `HINCRBY`, S3 기간 종료일(09-09).
+
+### 이력서 담당업무 확정본 (사람인, 2026-09-09 세션에서 확정)
+
+```
+인턴십 기간 중 자유주제로 콘서트 좌석 예매 시스템을 단독 기획·개발
+- 설계·구현·부하/장애 테스트·AWS 배포 전 과정 1인 수행
+
+- Redisson 분산락 vs DB 비관적 락을 각각 구현해 동시 300명 조건으로 벤치마크,
+  성능·실패 모드를 비교한 근거로 Redisson 채택 결정
+- Gatling 부하 테스트 + Redis·Kafka 강제 중단(카오스) 테스트로 장애·복구 중
+  데이터 정합성을 실측 검증, Prometheus/Grafana로 병목 분석
+- AWS 배포 전, AWS 스펙에 맞춰 리소스를 제한한 로컬 환경에서 한계 테스트를 먼저
+  수행해 병목(DB 커넥션 풀)을 진단하고 좌석 배치도 조회를 Redis 캐싱으로 개선
+- AWS EC2 + RDS 배포 및 재측정 — 앱·Redis·Kafka를 단일 인스턴스에 함께 올린
+  구조라 자원 경합으로 한계 지점이 예상보다 이르게 나타나는 현상을 확인하고 원인 진단
+
+[성과]
+- 동시 사용자 300명 기준 좌석 홀드 P95 1,512ms (목표 2초 이내)
+- Redis 약 1분 완전 중단 → 복구 후 좌석 상태 재구성 약 5초, 복구 구간에서도 오버셀 0건
+- Kafka 약 1분 30초 완전 중단 중에도 결제 요청·웹훅 모두 정상 처리(서버 오류 0건), 이벤트 유실 0건
+
+[주요 기술] Java 21, Spring Boot, MySQL, Redis, Kafka, Debezium, Docker, AWS(EC2/RDS)
+```
+
+수치 출처: `test-results.md` §3(분산락)·§5(AWS 부하)·§6(AWS 카오스). "누적 1,950명"은 반올림하지 말 것.
+
+---
 
 ## 구현 진행 상황
 
@@ -145,108 +212,7 @@
   - **최종 결론**: 트랜잭션 범위 축소 코드는 구조적으로 옳은 개선이라 그대로 채택하되(테스트로 안전성 검증 완료), 그 효과는 로컬 리허설 규모(Redis 0.5~1 vCPU)에서는 측정 불가 — AWS 재측정(관리형 Redis 또는 더 넉넉한 vCPU)에서 다시 봐야 진짜 효과를 알 수 있음.
   - 스크린샷은 이번 라운드(트랜잭션 축소)는 실패(KO) 위주라 캡처하지 않음 — Before/After(캐싱) 세트만 `capacity-limit/`에 유지.
 
-## 다음 작업
-
-### ⏭️ 이어서 할 것 (2026-09-05 — **오늘 안에 ③~⑥ 전부 끝내는 게 목표**, 사용자 확정)
-
-**현재 위치**: 커밋 + Gatling-in-container 재측정(클린) 완료 — 이 축소 스펙(2 vCPU)의 절벽 지점(450~500명)까지 확정. **오늘(09-05) 순서 = ③ 원인 진단 → ④ 튜닝 적용 + Before/After 재측정 → ⑤ AWS 배포 → ⑥ AWS 재측정.** 문서(캡쳐·표)는 각 단계 끝날 때마다 바로 정리(막판 몰아서 하지 않음). 포트폴리오 PDF(⑦)는 그다음.
-
-**안전판(그대로 유지)**: ⑤ AWS 배포가 원래 추정 반나절~1~2일짜리 리스크 있는 단계라, 하루 안에 못 끝내면 "AWS 예측표(`aws-spec.md` D)까지만 하고 실배포는 다음으로 후퇴" — 이미 문서화돼 있음.
-
-**스택 상태**: 컨테이너 기동 중(mysql/redis/app 등, 이벤트 1~12는 리셋됨 — 계정 6,041개만 남음). `docker ps`로 확인 후 필요시 `test-plan.md` 4-5 체크리스트로 재기동.
-
-#### ③ 원인 진단 (다음 클린 버스트에서 절벽 지점 근처를 직접 관찰)
-- 450~500 사이(예: 460/480/500)에서 재현하며 이번엔 **HikariCP active/pending, Tomcat busy thread, app GC 로그**를 Grafana/Actuator로 직접 관찰 — 어떤 자원이 먼저 포화되는지 특정
-- 후보: HikariCP 풀(기본 10) 고갈 / Tomcat accept-count·max-threads / app GC stop-the-world / mysql 자체 CPU
-- **재검증 필요**: 기존 "풀 크기가 레버가 아니다"(4-3, host 기반 1,500명대) 결론 — 그때는 절벽을 지난 지점만 봤으므로, 이번엔 절벽 근처에서 직접 관찰해야 함
-
-#### ④ 튜닝 적용 + Before/After 재측정
-- ③에서 특정된 병목에 맞는 조치 1~2개 적용(예: HikariCP 풀 크기 조정, Tomcat 스레드/큐 조정 등 — 확정된 원인에 따라 다름)
-- 같은 클린 방법론(DB/Redis 리셋 + N 단계별 증가)으로 튜닝 전/후 절벽 지점을 재측정해 개선율 확인 (classq 스타일: "원인 → 조치 → Before/After 수치" 구조로 `test-results.md`/`portfolio.md`에 기록)
-
-#### ⑤ AWS 배포 (test-plan.md 참고, ~1~2일, 리스크) — 순서상 ③④ 다음
-AWS 설정은 **EC2 + RDS만이 아님**. 순서:
-- **접근**: IAM 사용자(또는 루트 콘솔), 키페어(.pem) — SSH용
-- **네트워크**(제일 자주 막힘): 기본 VPC + 보안그룹 2개
-  - EC2용: 인바운드 22(내 IP), 8080/80(테스트), 3000·9090(Grafana·Prometheus, 내 IP)
-  - RDS용: 인바운드 3306 = **EC2 보안그룹에서만**
-- **EC2**: `m6i.xlarge`(AL2023 또는 Ubuntu), EBS **40~50GB**(Kafka+이미지가 작은 디스크 꽉 채움), Elastic IP(선택), 접속 후 **Docker + Compose + git 설치**
-- **RDS**(Debezium 때문에 까다로움): `db.m6i.large`/MySQL 8.0/gp3 20~50GB/Multi-AZ off/퍼블릭 off
-  - **파라미터 그룹**: `binlog_format=ROW`, `binlog_row_image=FULL`
-  - 백업 활성화(binlog 켜짐) + `binlog retention hours` 설정
-  - Debezium용 유저에 `REPLICATION SLAVE`, `REPLICATION CLIENT` 권한
-  - 초기 DB `ticketrush`
-- **앱 배포**(Claude가 파일 준비, 사용자가 EC2에서 실행):
-  - `docker-compose.aws.yml` 신규 — MySQL 컨테이너 빼고 RDS 엔드포인트, 나머지(Redis/Kafka/Connect/Nginx/Prometheus/Grafana) 컨테이너 유지, 앱은 Dockerfile 빌드
-  - **앱 env에 반드시**: `TZ=Asia/Seoul`(EC2 기본 UTC → openAt 9h 어긋남), `HIKARI_POOL`·`TOMCAT_ACCEPT`(한계 테스트에서 나온 튜닝, `aws-spec.md` C-1 — AWS 재측정에서 10 vs 30 비교). `JWT_ACCESS_EXPIRATION`은 운영 기본(30분)으로 되돌림(4h는 리허설 전용).
-  - nginx는 `nginx.rehearsal.conf` 계열(upstream `app:8080`) 사용 — 단, AWS는 rate limit 유지(리허설의 `capacity.conf`는 로컬 테스트 전용)
-  - `.env`(RDS 접속정보 + JWT/PortOne 시크릿)
-  - Debezium 커넥터 재설정(MySQL host = RDS 엔드포인트)
-- **자주 터지는 것**: RDS binlog/replication 권한(1순위), EC2↔RDS 보안그룹, EC2 디스크·메모리(16GB에 스택 전부)
-- **역할**: Claude = `docker-compose.aws.yml` + `.env` 템플릿 + 배포 스크립트 + 단계별 체크리스트 문서 / 사용자 = AWS 콘솔 클릭 + EC2 SSH 명령 실행
-- **안전판**: AWS가 하루 넘게 꼬이면 "aws-spec.md 예측표(D)까지만 + 실배포는 마감 후"로 후퇴
-
-#### ⑥ AWS 재측정 (test-plan.md 5번, ~반나절)
-- AWS에서 골든패스 부하(300 동시) + 한계 테스트 **다시** (카오스는 로컬만, 재측정 안 함)
-- `aws-spec.md` D(예측) vs E(실측) 대조, `test-results.md` 5번
-
-#### ⑦ 포트폴리오 문서화 (~1일)
-- `test-results.md` + `portfolio.md`(소재 1~7) + `decisions.md` + `aws-spec.md` + 스크린샷(`a1-redis-down/`, `a2-kafka-down/`) → Notion → PDF (classq `정찬혁_ClassQ_포트폴리오.pdf` 참고)
-- 파일별 역할은 사용자와 이미 정리됨 (portfolio.md가 본체, test-results.md가 수치 출처)
-
-#### 5. 마무리 (여유 시)
-- `architecture.md` "인프라 구성" 표 (배포 후 채움)
-- 남은 문서 정리, 가벼운 리팩토링만 (새 기능 금지)
-
----
-
-**진행 순서: 카오스 테스트 → 부하 테스트(분산락 최종 채택 포함) → AWS 배포**(decisions.md 13번). 카오스/부하 둘 다 로컬 Docker Compose 대상.
-
-**2026-08-28 세션에서 정리된 것(사용자 확인 완료):**
-- **카오스 중 부하 발생 = Gatling으로 통일**(별도 스크립트 안 만듦). 부하테스트에서 어차피 필요한 Gatling 시나리오를 먼저 작성해 카오스에도 재사용한다(decisions.md 8번 반영).
-- **분산락 채택 기준에 P99·락 실패 응답 형태 추가**(멘토 피드백, decisions.md 2번 반영). 처리량만 보지 않고 그룹 홀드 P99를 동등 지표로, 락 실패가 "즉시냐 대기 후냐"도 관찰. → 벤치마크 전에 **DB 비관적 락에 lock timeout을 걸고 실패를 `GROUP_HOLD_LOCK_TIMEOUT`으로 매핑하는 선행 수정**이 필요(현재는 MySQL 기본 50초 블로킹 후 500).
-- **AWS 인스턴스: m계열 방향**(classq는 c계열이지만 우리는 EC2 한 대에 스택 전부 공존 → RAM도 병목). 잠정 `m6i.xlarge` + RDS는 락 결과에 따라. 상세·확정은 `.claude/docs/aws-spec.md`(신규, A·B 작성 완료 / C·D는 로컬 부하테스트 후 / E는 AWS 배포 후).
-- **실제 배포까지 한다(2026-08-28 확정, 사용자 확인 완료)**: classq는 `aws-spec.md`를 예측까지만 쓰고 배포는 안 했다 — TicketRush는 EC2+RDS에 실제로 올리고 AWS에서 Gatling을 다시 돌려 예측표(D·E)를 실측으로 검증한다. "같은 프로젝트 반복"으로 안 보이게 하려는 것(decisions.md 10번). 카오스 테스트는 로컬만, AWS 재측정은 부하 테스트만.
-
-**카오스 테스트 준비(Phase 1) — 2026-08-28 완료, 스모크 검증까지:**
-1. ✅ `application.properties` — `management.metrics.distribution.percentiles-histogram.http.server.requests=true` + `slo` 버킷(200ms~10s). Micrometer 기본은 count/sum/max만이라 이게 없으면 P99가 안 나온다.
-2. ✅ Grafana 대시보드 provisioning — `grafana/dashboards/ticketrush.json`(uid `ticketrush-load`, 4패널: 응답시간 P50/P95/P99 · 상태코드별 요청/에러율 · Kafka Consumer lag · HikariCP) + `uri` 템플릿 변수. `grafana/provisioning/dashboards/dashboard.yml` 파일 프로바이더, `docker-compose.yml`에 `./grafana/dashboards` 마운트. 4개 패널 쿼리가 실제 데이터를 반환하는 것까지 확인(P99≈90ms 등).
-3. ✅ Gatling — `io.gatling.gradle` 플러그인 `3.15.1.3`(3.13.5는 Gradle 9와 비호환 — `reportsDir` 에러). `src/gatling/java/simulation/GoldenPathSimulation.java`(가입→로그인→대기열 진입/폴링→좌석 조회→홀드→결제 요청). 좌석 ID는 시나리오가 `GET /seats` 응답에서 직접 뽑는다(seed가 DB를 안 건드려도 되도록). `-Dgroup.hold.ratio`로 그룹 홀드 비중 조절(벤치마크는 1.0).
-   - `scripts/seed-load-test.ps1`(순수 REST — ORGANIZER 승인 + 이벤트/SEATED 구역 등록 + openAt를 미래로 두고 대기. **docker/DB 접근 없음** — 처음엔 `docker exec mysql`을 썼다가 Windows PowerShell에 docker CLI가 없어 "앱 선택" 팝업이 떠서 제거함).
-   - `scripts/run-gatling.ps1`(래퍼 — PowerShell이 인라인 `-Dfoo.bar=baz`를 깨먹어서 `@args` splat 필요).
-   - **스모크 검증**: 5·8 유저로 전체 골든 패스 실행 → KO 0, 모든 스텝(signup/login/queue/seat-list/seat-hold/payment-request) 통과 확인.
-4. ✅ Pumba — `scripts/chaos-redis.ps1`·`scripts/chaos-kafka.ps1`(`gaiaadm/pumba:0.11.6` `docker run`, `stop --restart --duration`). redis 대상으로 실제 stop→15s→restart→PING 복구까지 확인. compose 상시 서비스로 넣지 않고 스크립트로 온디맨드 실행(재현성).
-
-**테스트 계획 문서화(2026-08-28) — 실행 전 완료:**
-- `.claude/docs/test-plan.md` 신규 — 목표 수치(기준선, 각 값에 근거)·카오스 2 시나리오·분산락 벤치마크·**한계 테스트**·절차·합격 기준을 실행 전에 못박음. 멘토 피드백 2건 반영: ① 목표 수치를 미리 적어두지 않으면 결과를 판단할 근거가 없음 → 1번에 정합성/성능/복구 기준선. ② 처리량뿐 아니라 P99·락 실패 형태 → 3번 판정 규칙. 추가로 "몇 명까지 버티나" 한계 테스트(4번)가 그동안 빠져 있던 걸 넣음(classq `StressTestSimulation` 대응).
-- `.claude/docs/test-results.md` 신규 — 실측값 단일 출처(전부 "(대기)" 상태). `portfolio.md`·`aws-spec.md` D·E가 여기서 숫자를 끌어다 씀.
-- 목표 수치(사용자 확인 완료): 오버셀 0(절대) / 동시 300명 / P95 좌석조회<1s·홀드~결제<2s / **P99 그룹홀드<3s** / 에러율<1%(경합 409 제외) / Redis 복구<30s / Kafka lag 0 도달<60s. 근거는 test-plan.md 1번.
-
-**Phase 2 — 전부 완료.** test-plan.md 2번 카오스 2개(①Redis A-1 / ②Kafka A-2, 로컬 2026-09-03 + **AWS 재측정 2026-09-06**) + 3번 분산락 벤치마크(→ Redisson 채택, 2026-09-03) + 4번 한계 테스트(로컬 리허설 2026-09-04~05 + **AWS 재측정 2026-09-06**) + AWS 배포(2026-09-06) 전부 끝났다. 상세는 아래 2026-09-06 항목.
-
-**일정(2026-08-27 확정)**: 카오스/부하테스트/AWS 배포를 4주차로 넘기지 않고 **3주차 안(~08-30)에 완결 목표**. AWS 계정 가입은 완료(IAM 키/CLI 설정 여부는 미확인).
-
-## api-design.md 작성 중 나왔던 항목 정리 (모두 확정됨)
-
-- **ORGANIZER 가입 승인**: `ADMIN` 승인 필요로 확정. 가입 시 `account.status = PENDING`, 승인 전 로그인 시도는 `ACCOUNT_PENDING` 에러(db-schema.md `account`, api-design.md 1·6번, decisions.md 12번에 반영 완료). 팝업/안내 문구 표시는 프론트엔드 담당, 백엔드는 에러 코드만 전달
-- **ADMIN 역할의 기능**: 위 ORGANIZER 승인 처리가 첫 구체적 기능으로 확정 (api-design.md 6번 관리자 섹션 추가)
-- **정산/알림**: 지금은 구현 보류, Kafka Consumer 확장 여지만 열어둠 (api-design.md 남은 항목에 명시)
-- **좌석 홀드 해제 API**: 유지하기로 확정 (다른 좌석으로 바꾸는 UX용)
-
-## 주차별 일정 (1주차~4주차, 2026-08-10~09-09)
-
-decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기능·인프라 작업 없이 테스트 마무리 + 가벼운 리팩토링만** 하는 것이 원칙 — 이를 위해 인프라 확정과 카오스/부하테스트 착수를 3주차로 앞당겨 4주차에 부담을 넘기지 않는다.
-
-| 주차 | 기간(대략) | 작업 |
-|---|---|---|
-| 1주차 | 08-10 ~ 08-16 | 인증/인가 기반 구축(회원가입/로그인/JWT, Refresh Token은 httpOnly Cookie + Redis 저장) → **ADMIN 승인 API(ORGANIZER 가입 승인)** → **이벤트/구역/좌석 등록 API** → 대기열(순번 관리) 구현 → **포트원 테스트 계정/웹훅 수신 스모크테스트**(사업자등록 불필요, 3주차 결제 연동 시점에 막히지 않도록 선행 확인). **전체 완료.** PG는 토스페이먼츠(카드)+카카오페이(간편결제) 2채널로 확정. |
-| 2주차 | 08-17 ~ 08-23 | 좌석 상태 모델(단일 좌석 흐름), 홀드 TTL/만료 처리, Saga 상태머신, 분산락 벤치마크(Redisson RLock/DB 비관적 락 **두 방식 구현** — 어느 쪽을 채택할지 **확정**은 3주차 부하테스트로 이월) |
-| 3주차 | 08-24 ~ 08-30 | Kafka exactly-once, 결제 연동(**예약 취소 API 포함**), Nginx 설정 → **카오스 테스트 + 부하테스트(분산락 최종 채택 포함)** → **AWS 배포**(EC2 + Docker Compose + RDS, decisions.md 10번 — EKS/ElastiCache/MSK/CloudWatch 미도입 확정, 2026-08-27). **프론트엔드는 2026-08-23에 이미 완료.** |
-| 4주차 | 08-31 ~ 09-09 | 카오스 테스트·부하테스트 마무리, 결과 기반 간단한 리팩토링만. 새 기능/인프라 변경 없음 |
-
-**2026-08-16 (1주차 마지막 날) 점검에서 발견/확정된 사항**: decisions.md 13번 구현순서와 주차 일정을 대조한 결과, "이벤트/구역/좌석 등록 API"와 "ADMIN 승인 API"가 설계(api-design.md 2·6번)는 되어 있었지만 구현순서/주차 일정 어디에도 명시적으로 안 들어가 있던 걸 발견 — ADMIN 승인이 없으면 ORGANIZER가 로그인을 못해 이벤트 등록 자체가 막히고, 이벤트/좌석 데이터가 없으면 2주차 좌석 상태 모델 작업을 검증할 수 없어 순서상 1주차(인증/인가 다음)에 추가함(사용자 확인 완료). 예약 취소 API는 별도 항목 없이 3주차 결제 연동에 포함(Saga 보상 로직 재사용). 이 참에 미확정이었던 **Refresh Token 저장 방식도 확정**: httpOnly Cookie로 전달 + Redis(`refresh_token:{accountId}`)에 저장해 로그아웃/재로그인 시 무효화, 다중 기기 로그인은 미지원(계정당 1개 세션). decisions.md 3번, redis-design.md 9번, db-schema.md, api-design.md 전부 반영 완료.
-
-**2026-08-23**: 중간 보고서(`REPORT_DRAFT.md`, 제출 기한 2026-08-25) 작성 중 카오스(장애 주입) 테스트 도구를 **Pumba로 확정**(decisions.md 8번 반영) — Docker 컨테이너를 직접 대상으로 해 지금 쓰는 docker-compose(MySQL/Redis/Kafka)에 코드 수정 없이 바로 적용 가능하고, 컨테이너 kill/stop뿐 아니라 네트워크 지연·패킷 유실까지 다룰 수 있어 decisions.md 8번의 "일정 남으면 네트워크 파티션 확장" 시나리오와도 같은 도구로 이어진다. Toxiproxy(더 정교하지만 앱 연결 설정을 프록시 경유로 바꿔야 함)·수동 `docker stop`(가장 단순하지만 재현성·중간 상태 표현력이 떨어짐) 두 대안을 검토 후 선택(사용자 확인 완료). 실제 도입은 3주차 카오스 테스트 착수 시점.
+- **2026-08-23**: 중간 보고서(`REPORT_DRAFT.md`, 제출 기한 2026-08-25) 작성 중 카오스(장애 주입) 테스트 도구를 **Pumba로 확정**(decisions.md 8번 반영) — Docker 컨테이너를 직접 대상으로 해 지금 쓰는 docker-compose(MySQL/Redis/Kafka)에 코드 수정 없이 바로 적용 가능하고, 컨테이너 kill/stop뿐 아니라 네트워크 지연·패킷 유실까지 다룰 수 있어 decisions.md 8번의 "일정 남으면 네트워크 파티션 확장" 시나리오와도 같은 도구로 이어진다. Toxiproxy(더 정교하지만 앱 연결 설정을 프록시 경유로 바꿔야 함)·수동 `docker stop`(가장 단순하지만 재현성·중간 상태 표현력이 떨어짐) 두 대안을 검토 후 선택(사용자 확인 완료). 실제 도입은 3주차 카오스 테스트 착수 시점.
 
 **2026-08-23**: **데모용 프론트엔드(React/Vite/TypeScript) 골든 패스 완료 — 원래 3주차 계획을 오늘로 앞당김(사용자 확인 완료)**. 보고서 작성 중 "curl/스크립트 캡처 vs 지금 프론트 만들기"를 논의하다, 총 작업량은 언제 하든 같고 오히려 지금 끝내면 3주차 중간에 짬 내야 하는 부담이 없어진다는 점에서 오늘 진행하기로 결정함.
 - **백엔드**: `SecurityConfig`에 CORS 설정 추가(`corsConfigurationSource` 빈, `frontend.origin` 프로퍼티 — 기본값 `http://localhost:5173`, `.env`의 `FRONTEND_ORIGIN`으로 재정의 가능). 지금까지 프론트엔드가 없어 CORS 자체가 설정된 적이 없었다 — Refresh Token이 httpOnly Cookie라 `allowCredentials=true`가 필수이고, 그러면 허용 오리진에 `*`를 못 써서 프론트 오리진을 명시해야 했다.
@@ -283,7 +249,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
 
 - **2026-08-27**: **일정 재확인 — 3주차 안에 카오스/부하테스트/AWS 배포까지 다 끝내기로 확정(사용자 확인 완료).** 원래 "4주차는 3주차 테스트 마무리 버퍼"로 설계돼 있었지만, 사용자가 4주차로 넘기지 않고 3주차(~08-30) 안에 완결하고 싶다고 확정함. 오늘 포함 4일(08-27~08-30) 안에 "1~3주차 흐름 복습 + 카오스 테스트 + 부하테스트(분산락 결정 포함) + AWS 배포"를 다 넣어야 해서 상당히 빠듯하다는 점을 사용자와 공유·확인했다(제안한 완화책: 복습은 별도 시간 잡지 말고 필요할 때 문서를 짧게 참고하는 식으로, 카오스 시나리오는 decisions.md 8번 최소 범위인 Redis/Kafka 2개만). **AWS 사전 준비(계정 가입)는 이미 완료된 상태** — 계정 준비 단계에서 막힐 위험은 없어짐, IAM 키/CLI 설정 여부는 아직 미확인.
 
-- **2026-08-28**: **카오스 테스트 준비(Phase 1) 완료 — 문서 정리 + Gatling·Grafana 대시보드·Pumba 셋업, 스모크 검증까지.** 위 "다음 작업 > 카오스 테스트 준비(Phase 1)" 4개 항목 참고.
+- **2026-08-28**: **카오스 테스트 준비(Phase 1) 완료 — 문서 정리 + Gatling·Grafana 대시보드·Pumba 셋업, 스모크 검증까지.**
   - **문서(Phase 0)**: `decisions.md` 2번(분산락 채택 기준에 P99·락 실패 응답 형태 추가, 멘토 피드백)·8번(카오스 부하도 Gatling)·10번(EC2 m계열/RDS는 락 결과 의존), 신규 `.claude/docs/aws-spec.md`(A·B 작성, C·D·E는 부하테스트 후), `progress.md`·`CLAUDE.md`.
   - **코드/설정**: `application.properties`에 P99 히스토그램+SLO 버킷, `build.gradle`에 Gatling 플러그인, `src/gatling/java/simulation/GoldenPathSimulation.java`, `grafana/dashboards/ticketrush.json`+`grafana/provisioning/dashboards/dashboard.yml`+`docker-compose.yml` 대시보드 마운트, 스크립트 4종(`seed-load-test.ps1`·`run-gatling.ps1`·`chaos-redis.ps1`·`chaos-kafka.ps1`).
   - **검증**: Gatling 5·8 유저 스모크 → KO 0 전 스텝 통과. Grafana 대시보드 4패널 쿼리 실데이터 반환 확인. Pumba redis stop→restart→PING 복구 확인. `gatlingClasses` 컴파일 통과.
@@ -335,28 +301,7 @@ decisions.md 13번 구현 순서를 4주에 배분한 것. **4주차는 새 기�
   - **주최자 공연 등록 폼 추가(Option A, 프론트만)**: 사용자가 "간단하게라도 브라우저에서 주최자가 공연 등록"을 요청. **이벤트 승인 단계는 마감 때문에 안 만듦**(계정 승인만) — 승인된 주최자가 등록하면 바로 목록 노출. 신규 `OrganizerEventCreatePage`(`/organizer/events/new`, 공연명·오픈일시·구역 동적 추가[지정석 행·열 / 스탠딩 수량]), `ProtectedRoute`에 `organizerOnly` 프롭, 헤더에 `role === "ORGANIZER"`면 "공연 등록" 링크, `api/events.ts`에 `createEvent`. 기존 API `POST /api/v1/events` 그대로 호출 — 폼으로 만든 공연도 시드된 공연과 동일(좌석 생성·대기열·홀드·결제 전부). **C그룹 일부만 이번에 포함**(생성 UI만, 시간·좌석배치 세밀 입력 UI는 여전히 없음).
   - 검증: `tsc -b`/`oxlint`/`vite build` 통과, 로컬에서 `POST /events` 계약 확인(201). 브라우저 폼 테스트 사용자 확인 완료.
 
-**다음 작업(2026-09-07 밤, 내일 아침 제출 목표)**:
-1. ~~AWS 재배포~~ / ~~웹훅 검증~~ / ~~주최자 등록 폼~~ / ~~커밋+푸시~~ (`231c703`/`2d6dcd2`/`b7979bc`/`1c89edd`) — 완료
-2. ~~AWS에서 전체 시연 녹화 + 캡컷 편집~~ — 완료 (① 구매자 ② 주최자 가입→승인→공연 등록 ③ 관리자 콘솔)
-3. ~~판매 데이터 시드 (관리자 콘서트 현황 데모용)~~ — 완료 (이제 삭제된 EC2에만 있었음)
-4. ~~AWS 리소스 삭제~~ — 완료 (EC2 terminated / RDS deleted, 비용 0)
-5. **다이어그램** — **완료** (2026-09-07 저녁 재작업):
-   - ~~mermaid 3종 초안~~(`diagrams.md`) → **draw.io 네이티브로 전환**. Docker `rlespinasse/drawio-export`로 `.drawio → PNG` 로컬 렌더 파이프라인 확보(`MSYS_NO_PATHCONV=1` 필요, `-o export` 폴더 지정).
-   - `diagrams/01-architecture.drawio` — classq 인프라구조도 스타일(중첩 점선 컨테이너 `AWS > EC2` + `AWS RDS`/`모니터링` 독립 클러스터, 파스텔 색 박스, Outbox CDC 체인 주황 점선). decisions.md 10번(EKS/ElastiCache/MSK 미도입) 반영.
-   - `diagrams/02-erd.drawio` — draw.io 정식 ER 테이블(PK/FK/UK) + 까마귀발. db-schema.md 7테이블 전수 대조(mermaid 초안에서 빠졌던 `section`/`seat`/`reservation`의 `created_at` 보강). **사용자 요청으로 제목·범례·설계노트 박스는 제거**(테이블+관계선만). `임시참조폴더/티켓러쉬ERD.png`로 채택 확인.
-   - `diagrams.md` mermaid ERD도 `created_at` 3개 동기화, 인덱스 언급은 db-schema.md로 위임. 정식본은 `.drawio`.
-   - **처리 흐름도(시퀀스)는 일정상 취소**(2026-09-07, 사용자 결정). `03-1-golden-path.drawio` 삭제, `diagrams.md` 3절 삭제.
-   - PNG는 `diagrams/export/`. README용 ascii명 복사본은 `docs/images/`. **커밋 안 됨.**
-6. **README.md 갱신** — **완료**(2026-09-07). "중간 보고서"(8/28) 폐기 → 포트폴리오용 최종본.
-   - 섹션: 개요 / 핵심 기능(표) / 아키텍처(이미지) / ERD(이미지) / 기술 스택 / 기술적 의사결정·트러블슈팅 5건(분산락·rebuild·Kafka Boot4·한계테스트 예측미스·JDBC batch) / 테스트 결과 / 실행 방법 / 프로젝트 구조.
-   - **기술 스택은 5개 카테고리 표**(Backend / Data&Messaging / Infra&Deploy / Frontend / Test&Observability) — `build.gradle`·`package.json`·`docker-compose.yml`·`application.properties` 전수 대조로 MySQL·Docker·AWS EC2/RDS·Prometheus/Grafana·JPA·Actuator·React Router·PortOne SDK·JUnit 등 빠졌던 것 전부 추가.
-   - **이미지 4장** `docs/images/`(ascii명): `architecture.png`·`erd.png`(draw.io 렌더) + `grafana-load-test.png`·`grafana-chaos-kafka.png`(둘 다 `aws-remeasure/` 4패널 = HikariCP 포함). A-1은 표만, 사진 없음.
-   - `.env` 필수/선택 분리, 실제 기본값 반영. 시연영상·포트폴리오 PDF 링크는 자리표시자(사용자 결정 대기).
-   - **커밋 안 됨.**
-7. **포트폴리오 PDF** — HTML→브라우저 PDF 저장. 목차: ①개요 ②핵심문제 ③아키텍처 ④데이터모델 ⑤문제와해결(분산락·rebuild·Kafka Boot4·한계테스트 병목진단·웹훅검증) ⑥테스트결과 ⑦회고/한계 (⚠️ 아직 착수 안 함)
-8. **발표자료 PPT** (10~15슬라이드, PDF 소재 압축)
-9. **발표 대본** (PPT 순서대로)
-10. **커밋** — `docs: 다이어그램 + README` 등. push는 사용자
+- **2026-09-08: 발표 완료.** 시연 영상(AWS에서 ① 구매자 ② 주최자 가입→승인→공연 등록 ③ 관리자 콘솔, 캡컷 편집) · 다이어그램(draw.io `01-architecture`/`02-erd`, `docs/images/`) · README 포트폴리오용 재작성 · AWS 리소스 삭제까지 09-07에 끝냄. 09-08에 **발표 PPT 16장**(`바탕화면/로켓단25기_발표자료_정찬혁.pdf`) + **발표 대본**(`.claude/docs/발표-대본.md`, 슬라이드별 스크립트 + 예상질문 8개) 완성. 대본 대조 중 PPT 사실오류 6건 발견 → 사용자 수정: S12 결론(에러 급증 명시)·S12 표(500행 삭제)·S10 재구성 4초·S11 Kafka 91초·S6↔S7 순서·**S12·S13 Grafana 그래프 제거 → 표만**(그래프가 못 쓸 상태, 아래 "내일 할 일"에서 재측정). 미수정 경미 2건: S8 "Redis DECR"→실제 `HINCRBY`, S3 종료일 09-09.
 
 ## 추후 결정 필요 (지금 작업에는 안 막힘)
 

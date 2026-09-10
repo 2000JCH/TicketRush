@@ -4,7 +4,7 @@
   "tags": ["ticketrush"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "templating": {
@@ -19,7 +19,10 @@
         "includeAll": true,
         "allValue": ".*",
         "multi": true,
-        "current": { "text": "All", "value": "$__all" },
+        "current": {
+          "text": ["/api/v1/events/{eventId}/seats/holds"],
+          "value": ["/api/v1/events/{eventId}/seats/holds"]
+        },
         "sort": 1
       }
     ]
@@ -45,20 +48,22 @@
     },
     {
       "id": 2,
-      "title": "요청/에러율  (상태코드별, uri=$uri)",
+      "title": "에러율 %  (uri=$uri)",
       "type": "timeseries",
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "락 실패(409)·5xx를 정상 트래픽과 분리해서 본다. 실패 방식(즉시/대기 후)은 P99 패널과 대조.",
+      "description": "5xx/4xx 비율만 분리해서 본다(성공 트래픽은 그리지 않음, stacking 없음). 평상시엔 0% 근처, 카오스/한계 구간에서 스파이크→복구를 한눈에 확인.",
       "fieldConfig": {
-        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "stacking": { "mode": "normal" } } },
+        "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "stacking": { "mode": "none" } } },
         "overrides": [
-          { "matcher": { "id": "byRegexp", "options": "^(4|5).*" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+          { "matcher": { "id": "byName", "options": "5xx 비율" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] },
+          { "matcher": { "id": "byName", "options": "4xx 비율" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] }
         ]
       },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
-        { "refId": "A", "legendFormat": "{{status}}", "expr": "sum by (status) (rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval]))" }
+        { "refId": "A", "legendFormat": "5xx 비율", "expr": "100 * sum(rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\", status=~\"5..\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval]))" },
+        { "refId": "B", "legendFormat": "4xx 비율", "expr": "100 * sum(rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\", status=~\"4..\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count{job=\"ticketrush\", uri=~\"$uri\"}[$__rate_interval]))" }
       ]
     },
     {
