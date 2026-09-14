@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>TicketRush 부하/장애테스트_요약</title>
+<style>
+  body { font-family: -apple-system, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #111; max-width: 860px; margin: 40px auto; line-height: 1.5; font-size: 14px; }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  h2 { font-size: 20px; margin-top: 40px; border-bottom: 2px solid #222; padding-bottom: 6px; }
+  h3 { font-size: 15px; margin-top: 22px; color: #333; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 13px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  .pass { color: #0a7d2b; font-weight: 600; }
+  .highlight { background: #fff9db; }
+  .note { color: #555; font-size: 12.5px; }
+  img { max-width: 100%; border: 1px solid #ddd; margin: 6px 0; }
+  figcaption { font-size: 12px; color: #666; margin-bottom: 16px; }
+  .imgrow { display: flex; gap: 12px; flex-wrap: wrap; }
+  .imgrow figure { flex: 1; min-width: 300px; margin: 0; }
+  .footer { margin-top: 50px; padding-top: 12px; border-top: 1px solid #ccc; font-size: 12px; color: #777; }
+  @media print { body { margin: 0 20px; } h2 { page-break-before: auto; } }
+</style>
+</head>
+<body>
+
+<h1>TicketRush 부하/장애테스트_요약</h1>
+
+<h2>요약 (Executive Summary)</h2>
+<p><strong>대상 시스템:</strong> TicketRush — 실시간 콘서트 좌석 예매 시스템</p>
+<p><strong>측정 목적:</strong> 오픈 폭주 트래픽에서 오버셀 없이, Redis/Kafka 장애가 나도 데이터 정합성이 깨지지 않는지 실측 검증</p>
+
+<h3>테스트 환경</h3>
+<table>
+<tr><th>항목</th><th>값</th></tr>
+<tr><td>인프라</td><td>AWS EC2 m6i.xlarge(앱+Redis+Kafka+Kafka Connect+Nginx) + RDS db.m6i.large(MySQL)</td></tr>
+<tr><td>부하 도구</td><td>Gatling(GoldenPathSimulation) — 대기열 진입→좌석 조회→홀드→결제 요청 전체 여정</td></tr>
+<tr><td>장애 주입</td><td><code>docker stop</code> / <code>docker start</code>로 Redis·Kafka 컨테이너 직접 중단(Pumba는 환경 불안정으로 미사용)</td></tr>
+<tr><td>관찰</td><td>Prometheus + Grafana(API 응답시간 P50/P95/P99, 에러율, Kafka Consumer Lag, HikariCP 커넥션 풀)</td></tr>
+</table>
+
+<h3>핵심 결과</h3>
+<table>
+<tr><th>시나리오</th><th>조건</th><th>결과</th></tr>
+<tr><td>동시 300명 부하 테스트</td><td>15,000석 이벤트, 좌석 홀드 완전 동시 300명</td><td>P95 <span class="pass">883ms</span>(목표 2,000ms 이내), 오버셀 <span class="pass">0건</span></td></tr>
+<tr><td>분산락 벤치마크</td><td>좌석 4개·300명 완전 동시, Redisson vs DB 비관적 락</td><td>처리량·응답시간 동등, DB 락은 HikariCP 대기 147건(Redisson 0) → <span class="pass">Redisson 채택</span></td></tr>
+<tr><td>카오스 A-1 (Redis 다운)</td><td>좌석 400석·390명 부하 중 Redis 73초 완전 중단</td><td>오버셀 <span class="pass">0건</span>, 좌석 상태 재구성 완료 18초(목표 30초 이내)</td></tr>
+<tr><td>카오스 A-2 (Kafka 다운)</td><td>동일 부하 중 Kafka 97초 완전 중단</td><td>결제요청·웹훅 5xx <span class="pass">0건</span>, 이벤트 유실 <span class="pass">0건</span>, 사용자 경로 무영향</td></tr>
+<tr><td>한계 테스트</td><td>15,000석 이벤트, N=100→500 완전 동시 투입</td><td>N=500에서 절벽(성공률 76.4%) — 원인은 Redis 자원 경합(명령 타임아웃)</td></tr>
+</table>
+
+<h3>결론</h3>
+<ol>
+<li>세 가지 장애·부하 시나리오 전 구간에서 <strong>오버셀 0건</strong> — 시스템이 무너지는 방식은 항상 "느려짐"이었지 "틀리게 처리함"이 아니었다.</li>
+<li>분산락은 성능 차이가 거의 없었지만, DB 락은 부하가 커질수록 먼저 무너지는 실패 모드(HikariCP 커넥션 고갈)가 있어 Redisson을 채택했다.</li>
+<li>Outbox 패턴(DB 트랜잭션 + CDC)이 Kafka를 critical path에서 제거해, Kafka가 91~97초 완전히 죽어도 결제 처리는 전혀 영향받지 않았다.</li>
+<li>한계 테스트에서 "AWS vCPU를 늘리면 한계도 오를 것"이라는 사전 기대가 실측으로 틀렸음을 확인 — 실제 병목은 CPU가 아니라 app·Kafka와 Redis를 한 인스턴스에서 나눠 쓰는 자원 경합이었다.</li>
+</ol>
+
+<h2>1. 분산락 벤치마크 — Redisson RLock vs DB 비관적 락</h2>
+<p>그룹 좌석 홀드(2매 동시 선택) 직렬화 방식을 가정이 아니라 실측으로 선택하기 위해 두 방식을 직접 구현해 동일 조건(좌석 4개, 300명 완전 동시)으로 비교했다. 실패 방식(타임아웃 처리)까지 맞춰 공정하게 비교했다.</p>
+<table>
+<tr><th>지표</th><th>Redisson RLock</th><th>DB 비관적 락</th></tr>
+<tr><td>오버셀</td><td>0</td><td>0</td></tr>
+<tr><td>처리량</td><td>238 req/s</td><td>238 req/s</td></tr>
+<tr><td>Global P99</td><td>1,032ms</td><td>1,018ms</td></tr>
+<tr><td>락 획득 타임아웃</td><td>0건</td><td>0건</td></tr>
+<tr class="highlight"><td><strong>HikariCP 대기(pending) 피크</strong></td><td><strong>0</strong></td><td><strong>147</strong> (풀 10개 만석)</td></tr>
+</table>
+<p class="note">성능은 사실상 동등했다 — 홀드 액션이 HSETNX 한 번으로 매우 짧아 락 점유 시간이 짧기 때문. 유일한 실질 차이는 DB 락이 REQUIRES_NEW 트랜잭션마다 HikariCP 커넥션을 물어 300 동시 요청에서 대기가 147건까지 쌓인 것(Redisson은 0). "지금 느려서"가 아니라 "확장 시 커넥션 고갈로 먼저 무너지는 실패 모드가 있어서" Redisson을 채택했다.</p>
+
+<h2>2. 카오스 A-1 — Redis 완전 중단</h2>
+<p>좌석 400석 이벤트에 390명(버스트+트리클+복구 관찰용 꼬리 부하)을 태운 상태로 Redis를 73초간 완전히 내렸다 올렸다.</p>
+<table>
+<tr><th>항목</th><th>결과</th></tr>
+<tr><td>장애 시간</td><td>73초</td></tr>
+<tr><td>좌석 상태 재구성 완료</td><td class="pass">18초 (목표 30초 이내)</td></tr>
+<tr><td>정상 응답 완전 복귀</td><td class="pass">24초</td></tr>
+<tr><td><strong>오버셀</strong></td><td class="pass"><strong>0건</strong></td></tr>
+<tr><td>최대 응답시간</td><td>2,028ms (Redis 타임아웃 2초 cap 확인)</td></tr>
+<tr><td>실패(KO) 원인</td><td>62.6%가 대기열 유실(재진입 필요, 알려진 한계) · 나머지 장애 구간 타임아웃 · 진짜 서버 버그성 실패 0건</td></tr>
+</table>
+<div class="imgrow">
+<figure><img src="images/a1-4panel.png"><figcaption>4패널 종합 — 장애 구간(파란 점선)에서 응답시간·에러율이 튀었다가 복구 후 정상화</figcaption></figure>
+<figure><img src="images/a1-error.png"><figcaption>에러율 — 장애 중 5xx(기술적 실패) → 복구 직후 4xx(대기열 유실 확인)로 전환되는 패턴</figcaption></figure>
+</div>
+<p class="note">Redis가 재시작으로 데이터를 통째로 잃어도, DB 기준으로 좌석 상태를 자동 재구성하는 로직이 동작해 오버셀 없이 복구됨을 확인했다.</p>
+
+<h2>3. 카오스 A-2 — Kafka 브로커 완전 중단</h2>
+<p>동일 규모 부하 중 Kafka 브로커를 97초간 완전히 내렸다 올렸다. 결제 실패 웹훅을 동시에 흘려보내 outbox→Kafka 경로를 실제로 태웠다.</p>
+<table>
+<tr><th>항목</th><th>결과</th></tr>
+<tr><td>장애 시간</td><td>97초</td></tr>
+<tr><td>장애 중 결제요청·웹훅 5xx</td><td class="pass">0건 (2,233 + 207건 전부 성공)</td></tr>
+<tr><td>이벤트 유실</td><td class="pass">0건 (outbox 207건 = 좌석 반납 207건)</td></tr>
+<tr><td>Consumer Lag 0 도달</td><td class="pass">복구 직후 자동 (목표 60초 이내)</td></tr>
+<tr><td><strong>오버셀</strong></td><td class="pass"><strong>0건</strong></td></tr>
+<tr><td>장애 중 최대 응답시간</td><td>160ms — 평상시와 동일, 무영향</td></tr>
+</table>
+<div class="imgrow">
+<figure><img src="images/a2-4panel.png"><figcaption>4패널 종합 — 장애 구간 내내 5xx 0%, 응답시간도 장애와 무관하게 평상시 수준</figcaption></figure>
+<figure><img src="images/a2-lag.png"><figcaption>Kafka Consumer Lag — 장애 구간에만 끊기고 복구 후 즉시 0으로 수렴</figcaption></figure>
+</div>
+<p class="note">결제 확정/실패 처리가 DB 트랜잭션 + outbox 기록으로 완결되고 Kafka는 그 이후 비동기 전파만 담당(Outbox 패턴)하기 때문에, Kafka가 완전히 죽어도 사용자 경로는 그래프로 장애 시점을 구분할 수 없을 정도로 무영향이었다.</p>
+
+<h2>4. 한계 테스트 — 동시 몇 명까지 버티는가</h2>
+<p>15,000석 단일 이벤트를 재사용하며 N=100→250→300→350→450→500 완전 동시 투입으로 절벽 지점을 확인했다(AWS EC2 m6i.xlarge + RDS db.m6i.large). <strong>여기서 측정하는 건 좌석 홀드→결제 요청 구간(목표 &lt;2,000ms)이며, 대기열 폴링 대기 체감은 별도(이탈률 테스트)에서 측정한다.</strong></p>
+<table>
+<tr><th>N</th><th>좌석 홀드 성공/전체</th><th>P95</th><th>P99</th></tr>
+<tr><td>100</td><td>100/100</td><td>16ms</td><td>17ms</td></tr>
+<tr><td>250</td><td>250/250</td><td>304ms</td><td>940ms</td></tr>
+<tr><td>300</td><td>300/300</td><td>883ms</td><td>1,032ms</td></tr>
+<tr><td>350</td><td>350/350</td><td>136ms</td><td>260ms</td></tr>
+<tr><td>450</td><td>450/450</td><td>1,969ms</td><td>2,392ms</td></tr>
+<tr class="highlight"><td><strong>500</strong></td><td><strong>382/500 (23.6% 실패)</strong></td><td>4,080ms</td><td>4,260ms</td></tr>
+</table>
+<div class="imgrow">
+<figure><img src="images/capacity-response.png"><figcaption>좌석 홀드 응답시간 — 100~450은 오르내림(300→350 반전 포함)이 있으나 전부 목표(2초) 이내, 500에서만 절벽</figcaption></figure>
+<figure><img src="images/capacity-error.png"><figcaption>에러율 — N=500 구간에서만 5xx 스파이크</figcaption></figure>
+</div>
+<p class="note"><strong>원인 진단(앱 로그):</strong> N=500 구간 실패의 원인은 전부 <code>RedisCommandTimeoutException</code>(2초 타임아웃). AWS EC2 한 대에서 app·Kafka·Redis가 CPU를 나눠 쓰는 구조라, 부하가 몰리면 Redis 명령 처리가 지연되며 실패로 전환됐다 — "vCPU를 2배로 늘리면 한계도 오를 것"이라는 사전 기대와 달리, 실제 병목은 CPU 총량이 아니라 Redis 자원 경합이었다. 오버셀은 전 구간 0건.</p>
+<p class="note"><strong>참고(N=300→350 반전):</strong> 좌석홀드만 보면 350이 300보다 빠른데, 350에서 시스템이 더 여유로워진 게 아니다 — 같은 순간 전체 API 기준(uri=All)으로는 오히려 350 구간이 테스트 전체에서 가장 나빴다(P99 5.8s). 그 부담을 대기열 폴링(전체 요청의 62%)이 흡수했고 좌석홀드는 그 틈에 빠르게 처리됐을 뿐이다. 라운드당 표본이 작아 100~450 구간의 오르내림은 노이즈로 보는 게 맞고, 진짜 신호는 500에서의 절벽뿐이다.</p>
+
+<h2>한계와 다음 단계</h2>
+<p class="note"><strong>측정 한계:</strong> 한계 테스트의 정확한 절벽 위치(N=500)는 AWS 인스턴스 배정에 따라 달라질 수 있음을 확인했다(동일 조건 재검증에서 이전 측정과 차이 발생) — 병목의 정체(Redis 자원 경합)는 재현됐으나 절대 임계값은 인스턴스별 변동성이 있다.</p>
+<p class="note"><strong>다음 단계:</strong> Redis를 별도 인스턴스(ElastiCache 또는 전용 EC2)로 분리해 자원 경쟁 자체를 제거, 대기열 폴링을 push 방식(WebSocket)으로 전환해 Redis 요청량 절감.</p>
+
+<div class="footer">
+전체 측정 기록은 GitHub 저장소에서 확인 가능합니다.<br>
+github.com/2000JCH/TicketRush/.claude/docs/test-results.md
+</div>
+
+</body>
+</html>
